@@ -111,6 +111,8 @@ func (s *Service) managementRoutes(prefix string) []pluginapi.ManagementRoute {
 		{Method: "POST", Path: prefix + "/models/refresh", Description: "从上游拉取模型清单并缓存。"},
 		{Method: "POST", Path: prefix + "/settings", Description: "更新插件运行期设置（每日自动签到、签到后自动任务）。"},
 		{Method: "GET", Path: prefix + "/school/status", Description: "开学季活动状态。"},
+		{Method: "POST", Path: prefix + "/tasks/autoall", Description: "对全部或选中账号执行一键任务（签到 → 成长任务 → 活动领取）。"},
+		{Method: "GET", Path: prefix + "/tasks/autoall/status", Description: "一键任务的进度快照。"},
 		{Method: "POST", Path: prefix + "/keepalive", Description: "手动执行 token 保活。"},
 		{Method: "POST", Path: prefix + "/plans/preview", Description: "查询账号当前可领套餐与人机验证控件参数。"},
 		{Method: "POST", Path: prefix + "/activities/preview", Description: "只读探测账号当前活动资格，不执行领取。"},

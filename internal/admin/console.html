@@ -699,13 +699,31 @@ details > summary { cursor: pointer; color: var(--muted); font-size: 12.5px; }
       body: body ? JSON.stringify(body) : undefined
     }).then(function (resp) {
       if (haltOnAuthFailure(resp.status)) return null;
-      return resp.json().then(function (data) {
+      // 先取文本再解析：宿主对**未注册**的管理路由直接回 404 空体，
+      // resp.json() 会抛 "Unexpected end of JSON input" —— 那个报错完全
+      // 指不到真正原因。这里把空体/非 JSON 都翻成人能看懂的一句话。
+      return resp.text().then(function (raw) {
+        var data = null;
+        if (raw) {
+          try {
+            data = JSON.parse(raw);
+          } catch (parseErr) {
+            var bad = new Error("接口返回的不是 JSON（HTTP " + resp.status + "）");
+            bad.status = resp.status;
+            throw bad;
+          }
+        }
         if (!resp.ok) {
           var msg = (data && data.error) ? data.error : ("HTTP " + resp.status);
           var failure = new Error(msg);
           // 把状态码带出去：调用方要按 409 / 400 分流，而不是匹配中文文案。
           failure.status = resp.status;
           throw failure;
+        }
+        if (data === null) {
+          var empty = new Error("接口没有返回内容（HTTP " + resp.status + "）：该管理路由可能未在插件里注册");
+          empty.status = resp.status;
+          throw empty;
         }
         // 宿主把插件的响应体**原样**透传给浏览器（{ok, result} 那层信封是
         // 插件与宿主之间的 RPC 格式，不会到达这里）。因此直接返回 body，
