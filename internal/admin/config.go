@@ -27,6 +27,12 @@ type PluginConfig struct {
 	LogLevel string
 	// LogToFile 为 true 时把日志写入 <StateDir>/logs。
 	LogToFile bool
+	// LogToHost 为 true 时把插件日志镜像进宿主日志文件（管理面板可见）。
+	LogToHost bool
+	// HostLogFile 是宿主日志文件路径，空表示按 StateDir 自动探测。
+	HostLogFile string
+	// HostLogLevel 是镜像到宿主日志的最低级别：debug / info / error。
+	HostLogLevel string
 
 	// AutoCheckin 开启每日自动签到。
 	AutoCheckin bool
@@ -73,6 +79,10 @@ func DefaultPluginConfig() PluginConfig {
 		EnabledRealms: SplitList(DefaultRealmList),
 		StateDir:      DefaultStateDir(),
 		LogLevel:      DefaultLogLevel,
+		// 宿主日志镜像默认开启：面板日志页只读宿主 main.log，
+		// 不开这个开关插件日志在面板里完全不可见。
+		LogToHost:     true,
+		HostLogLevel:  DefaultLogLevel,
 		AutoCheckin:   true,
 		AutoCheckinAt: DefaultCheckinAt,
 		AutoTasks:     true,
@@ -149,6 +159,16 @@ func applyConfigLine(cfg *PluginConfig, key, value string) error {
 		}
 	case "log_to_file":
 		cfg.LogToFile = ParseBool(value, cfg.LogToFile)
+	case "log_to_host":
+		cfg.LogToHost = ParseBool(value, cfg.LogToHost)
+	case "host_log_file":
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			cfg.HostLogFile = trimmed
+		}
+	case "host_log_level":
+		if trimmed := strings.ToLower(strings.TrimSpace(value)); trimmed != "" {
+			cfg.HostLogLevel = trimmed
+		}
 	case "auto_checkin":
 		cfg.AutoCheckin = ParseBool(value, cfg.AutoCheckin)
 	case "auto_checkin_at":
@@ -173,6 +193,11 @@ func ValidatePluginConfig(cfg PluginConfig) error {
 	case "debug", "info", "error":
 	default:
 		return fmt.Errorf("log_level %q is not supported (want debug, info or error)", cfg.LogLevel)
+	}
+	switch cfg.HostLogLevel {
+	case "debug", "info", "error":
+	default:
+		return fmt.Errorf("host_log_level %q is not supported (want debug, info or error)", cfg.HostLogLevel)
 	}
 	if strings.TrimSpace(cfg.StateDir) == "" {
 		return fmt.Errorf("state_dir is empty")

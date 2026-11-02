@@ -64,14 +64,7 @@ var (
 
 // SetLevel 设置日志级别。接受 debug / info / error，未知值回落 info。
 func SetLevel(raw string) {
-	switch strings.ToLower(strings.TrimSpace(raw)) {
-	case "debug":
-		setLevel(LevelDebug)
-	case "error":
-		setLevel(LevelError)
-	default:
-		setLevel(LevelInfo)
-	}
+	setLevel(LevelFromName(raw))
 }
 
 func setLevel(lvl Level) {
@@ -166,12 +159,14 @@ func pruneLogFiles(dir string) {
 // Close 关闭文件 sink。供 shutdown 调用。
 func Close() {
 	fileMu.Lock()
-	defer fileMu.Unlock()
 	if fileSink != nil {
 		_ = fileSink.Close()
 		fileSink = nil
 		fileDay = ""
 	}
+	fileMu.Unlock()
+
+	closeHost()
 }
 
 // Debug 记录一条 debug 日志。
@@ -201,6 +196,9 @@ func log(lvl Level, label string, format string, args ...any) {
 		Level:   strings.ToLower(label),
 		Message: message,
 	})
+
+	// 镜像进宿主日志文件，让管理面板的日志页能看到插件行为。
+	host.write(lvl, label, now, message)
 
 	fileMu.Lock()
 	if fileSink != nil {

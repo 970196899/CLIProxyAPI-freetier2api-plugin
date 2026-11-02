@@ -136,6 +136,10 @@ Configure under `plugins.configs.freetier` in `config.yaml` (runtime settings ca
 | `extra_models` | string | empty | Additional model IDs to register (comma-separated) |
 | `state_dir` | string | `~/.freetier-plugin` | State and cache directory |
 | `log_level` | string | `info` | Log level: `debug` / `info` / `error` |
+| `log_to_file` | bool | `false` | Also write logs to `<state_dir>/logs/`, one file per day |
+| `log_to_host` | bool | `true` | Mirror plugin logs into the host `main.log` so they show up in the CLIProxyAPI panel log page |
+| `host_log_file` | string | auto-detect | Host log path. Empty means derive `<base>/auths/logs/main.log` or `<base>/logs/main.log` from `state_dir`; disabled when neither exists |
+| `host_log_level` | string | `info` | Minimum level mirrored to the host log: `debug` / `info` / `error` |
 
 ## Project Architecture
 

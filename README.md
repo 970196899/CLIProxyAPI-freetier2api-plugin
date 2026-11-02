@@ -136,6 +136,10 @@ curl http://localhost:8317/v1/messages \
 | `extra_models` | string | 空 | 额外补充注册的模型名（逗号分隔） |
 | `state_dir` | string | `~/.freetier-plugin` | 状态与缓存目录（若存在 `~/.cli-proxy-api` 则默认使用其下 `freetier` 子目录） |
 | `log_level` | string | `info` | 日志级别：`debug` / `info` / `error` |
+| `log_to_file` | bool | `false` | 额外把日志写入 `<state_dir>/logs/`，按天分文件 |
+| `log_to_host` | bool | `true` | 把插件日志镜像进宿主 `main.log`，CLIProxyAPI 面板的日志页可直接查看 |
+| `host_log_file` | string | 自动探测 | 宿主日志文件路径。留空时按 `state_dir` 反推 `<base>/auths/logs/main.log` 或 `<base>/logs/main.log`，都不存在则不启用 |
+| `host_log_level` | string | `info` | 镜像到宿主日志的最低级别：`debug` / `info` / `error` |
 
 ## 项目架构
 
