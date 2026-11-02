@@ -140,7 +140,12 @@ jobs:
 
   release:
     name: 发布 Release
-    if: startsWith(github.ref, 'refs/tags/v')
+    # always() 不能省：矩阵里 experimental 平台被取消（runner 抢不到、排队超时）
+    # 时，continue-on-error 只挡 failure，挡不住 cancelled —— 整个 build 的 result
+    # 变成 cancelled，隐式的 success() 判断就把发版直接 skip 掉，tag 推了却什么
+    # 都没出（v0.1.40 就是这么空的）。真正的失败仍然拦：必选平台失败时 result 是
+    # failure，这里照样不发。缺哪个必选产物由下面的校验步骤兜底。
+    if: always() && startsWith(github.ref, 'refs/tags/v') && needs.build.result != 'failure'
     needs: build
     runs-on: ubuntu-latest
     permissions:
@@ -157,6 +162,26 @@ jobs:
         with:
           path: assets
           merge-multiple: true
+
+      # 实验性平台可以缺席，必选平台不行：取消/失败都可能在 assets 里留个空目录，
+      # 直接打包会发出一个缺 linux 或缺 Apple Silicon 的 Release。
+      - name: 校验必选平台产物齐全
+        shell: bash
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          missing=0
+          for goos in linux_amd64 linux_arm64 darwin_arm64; do
+            archive="assets/freetier_${version}_${goos}.zip"
+            if [ ! -f "$archive" ]; then
+              echo "::error::缺少必选产物 $archive"
+              missing=1
+            fi
+          done
+          ls -la assets
+          exit "$missing"
 
       - uses: actions/setup-go@v5
         with:
