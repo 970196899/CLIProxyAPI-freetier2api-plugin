@@ -10,7 +10,7 @@
 
 如果这个项目帮到了你，欢迎点个 Star 支持一下。
 
-> **本仓库说明**：原仓库 `jiandanc/CLIProxyAPI-freetier2api-plugin` 已随作者账号一并从 GitHub 消失（账号与仓库均为 404），本仓库是它的延续维护线，自 **v0.1.29** 起由 `cxy2730` 接手，插件 ID 仍为 `freetier`，已有安装可直接覆盖升级。历史提交与 `v0.1.28` 及更早的 tag 一并保留。
+> **本仓库说明**：上游 `jiandanc/CLIProxyAPI-freetier2api-plugin` 已随作者账号一并从 GitHub 消失（账号与仓库均为 404）。本仓库自 **v0.1.29** 起由 `cxy2730` 接手维护，插件 ID 仍为 `freetier`，已有安装可直接覆盖升级。仓库已从 fork 网络脱离，是独立仓库；完整提交历史保留，`v0.1.44` 及更早的 tag 只存在于归档仓库 `cxy2730/CLIProxyAPI-freetier2api-plugin-legacy`，本仓库从 `v0.1.45` 起继续发版。
 
 ## 功能特性
 
@@ -55,7 +55,7 @@
 
 ### 方式二：手动安装 Release 动态库
 
-从 [Releases](https://github.com/cxy2730/CLIProxyAPI-freetier2api-plugin/releases) 下载对应平台的归档包，解压后将动态库（`freetier.so` / `freetier.dylib` / `freetier.dll`）放入 CPA 插件目录，并在 `config.yaml` 中启用：
+从 [Releases](https://github.com/cxy2730/CLIProxyAPI-freetier2api-plugin/releases) 下载对应平台的归档包，解压后将动态库（`freetier.so` / `freetier.dll`）放入 CPA 插件目录，并在 `config.yaml` 中启用：
 
 ```yaml
 plugins:
