@@ -475,9 +475,8 @@ func TestSettingsKeepsOnlyTwoToggles(t *testing.T) {
 // TestVendorMenuShowsAllVendors 验证「添加账号」下拉能完整看到全部渠道。
 //
 // 供应商有 16 个，菜单原来既没有 max-height 也没有滚动，绝对定位溢出卡片
-// 的部分会被后续 .card（带 backdrop-filter，自成层叠上下文）盖住，尾部
-// 渠道永远看不到也滚不到。这里锁住三件事：限高 + 纵向滚动、展开时抬升
-// 所在卡片、两个下拉都走同一个抬升函数。
+// 的部分会被后续卡片的内容盖住，尾部渠道永远看不到也滚不到。这里锁住三件
+// 事：限高 + 纵向滚动、展开时抬升所在卡片、两个下拉都走同一个抬升函数。
 func TestVendorMenuShowsAllVendors(t *testing.T) {
 	page := Page("/plugins/freetier")
 

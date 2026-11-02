@@ -35,16 +35,23 @@
   --ff-mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
 }
 * { box-sizing: border-box; }
+html { background: var(--bg); }
 body {
   margin: 0; color: var(--fg);
   font: var(--f-4,14px)/1.55 var(--ff);
   -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale;
-  background: var(--bg);
-  /* 环境光：两团低饱和色光，给玻璃一个可折射的背景（AURORA） */
+  background: var(--bg); isolation: isolate;
+}
+/* 环境光：两团低饱和色光，给玻璃一个可折射的背景（AURORA）。
+   独立成一张固定合成层 —— 用 background-attachment: fixed 时，滚动会让
+   整块 body 背景重新光栅化，高刷屏上直接掉帧。translateZ(0) 让它一次性
+   上屏后由合成器平移，滚动期间零重绘。 */
+body::before {
+  content: ""; position: fixed; inset: 0; z-index: -1; pointer-events: none;
   background-image:
     radial-gradient(46vmax 46vmax at -8% -12%, rgba(92,124,151,.22), transparent 66%),
     radial-gradient(40vmax 40vmax at 108% 6%, rgba(120,104,150,.16), transparent 66%);
-  background-attachment: fixed;
+  transform: translateZ(0);
 }
 ::selection { background: var(--accent-soft); }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
@@ -55,8 +62,7 @@ body {
 /* ---- 头部：slim 渐变头带（宿主外壳悬浮按钮压在右上，保持低调不打架） ---- */
 header { margin: 14px 20px 0; border-radius: var(--radius); padding: 16px 22px;
          background: var(--glass); border: 1px solid var(--border);
-         box-shadow: var(--shadow-card); position: relative; overflow: hidden;
-         backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); }
+         box-shadow: var(--shadow-card); position: relative; overflow: hidden; }
 header::before { content: ""; position: absolute; width: 300px; height: 300px; border-radius: 50%;
                  right: -70px; top: -160px;
                  background: radial-gradient(circle, rgba(127,166,200,.13), transparent 65%); }
@@ -65,9 +71,12 @@ header h1 { margin: 0; font-size: 19px; font-weight: 700; letter-spacing: -.3px;
 header .sub { color: var(--muted); margin-top: 2px; }
 main { padding: 14px 20px 48px; }
 
+/* 卡片不再挂 backdrop-filter：卡片背后只有一张静止的环境光渐变，
+   模糊结果恒定 —— 每帧重算等于白烧 GPU，滚动时尤其明显。用不透明度和
+   边框维持玻璃观感，视觉几乎无差，滚动成本降到零。 */
 .card { background: var(--glass); border: 1px solid var(--border);
         border-radius: var(--radius); padding: 16px 18px; margin-bottom: 14px;
-        box-shadow: var(--shadow-card); backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); }
+        box-shadow: var(--shadow-card); }
 .card h2 { margin: 0 0 12px; font-size: 14.5px; font-weight: 700;
            display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
 .card h2::before { content: ""; width: 9px; height: 9px; border-radius: 3px;
@@ -83,8 +92,10 @@ main { padding: 14px 20px 48px; }
 .row > .grow-2 { flex: 2 1 0; min-width: 0; }
 button.act { padding: 6.5px 13px; border: 1px solid var(--border-strong); border-radius: 9px;
              background: var(--card); color: var(--fg); cursor: pointer; font-size: 13px; font-weight: 550;
+             /* 只过渡合成器属性：background/border-color/color 是离散色变，
+                box-shadow 与 filter 每帧都要重新光栅化，高刷下 hover 会发黏。 */
              transition: background .12s ease, border-color .12s ease, color .12s ease,
-                         transform .08s ease, box-shadow .12s ease, filter .12s ease; }
+                         transform .08s ease; }
 button.act:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
 button.act:active { transform: scale(.98); }
 button.act:disabled { opacity: .5; cursor: not-allowed; }
@@ -102,10 +113,11 @@ th, td { text-align: left; padding: 7.5px 10px; border-bottom: 1px solid var(--b
 /* 表头吸顶只对随页面滚动的表格生效。#models 是 overflow-x 滚动容器，
    纵向也被计算为 auto，吸顶落不到视口上，故模型表不吸顶（预期，非缺陷）。 */
 thead th { position: sticky; top: -1px; z-index: 1;
-           background: rgba(24,27,33,.94); backdrop-filter: blur(8px);
+           background: rgba(24,27,33,.96);
            color: var(--muted); font-size: 11.5px; font-weight: 650; letter-spacing: .05em;
            border-bottom: 1px solid var(--border-strong); }
-tbody tr { transition: background .12s ease; }
+/* 行悬停不做过渡：鼠标沿长表格快速划过时，每行都会起一个 120ms 的背景动画，
+   十几个动画同时跑就是在和滚动抢帧。瞬时着色反而更跟手。 */
 tbody tr:hover td { background: var(--row-hover); }
 tbody tr:hover td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
 tbody tr:last-child td { border-bottom: none; }
@@ -139,9 +151,12 @@ th.sortable .th-sort-wrap { display: inline-flex; align-items: center; gap: 3px;
 /* 阈值仪表：渐变填充，剩余比例高=绿 / 中=琥珀 / 低=红 */
 .bar { position: relative; display: inline-block; width: 72px; height: 6px;
        border-radius: 4px; background: var(--border); vertical-align: middle; overflow: hidden; }
-.bar i { display: block; height: 100%; border-radius: 4px;
+/* 用 transform 而不是 width 做填充：width 动画每帧触发 layout + paint，
+   表格里一排仪表同时动就是几十次重排；scaleX 只走合成器。 */
+.bar i { display: block; height: 100%; width: 100%; border-radius: 4px;
          background: linear-gradient(90deg, #6FBF93, #3E7A57);
-         transition: width .3s ease; }
+         transform: scaleX(0); transform-origin: left center;
+         transition: transform .3s var(--ease-out); }
 .bar.warn i { background: linear-gradient(90deg, #D2A85F, #9A7736); }
 .bar.err  i { background: linear-gradient(90deg, #E0847A, #A85B52); }
 
@@ -200,8 +215,7 @@ input.aliasinput:focus { outline: none; border-color: var(--accent); box-shadow:
 .cols-setter { margin-left: auto; }
 .dropdown { position: relative; display: inline-block; }
 /* max-height + 纵向滚动：供应商有 16 个，菜单不加限制会超出卡片底部，
-   而后续 .card 带 backdrop-filter（自成层叠上下文）会盖在上面，尾部渠道
-   既看不见也滚不到。 */
+   尾部渠道既看不见也滚不到（菜单靠 liftMenuCard 把所在卡片抬到最上层）。 */
 .dropdown-menu { position: absolute; top: calc(100% + 6px); left: 0; z-index: 20;
                  min-width: 210px; max-height: min(72vh, 560px); overflow: hidden auto;
                  overscroll-behavior: contain;
@@ -223,7 +237,7 @@ input.aliasinput:focus { outline: none; border-color: var(--accent); box-shadow:
    390px 视口下横幅能长到 200px 以上，把账号表格整块挤出首屏。 */
 .banner { padding: 10px 14px; border-radius: 10px; margin-bottom: 12px; font-size: 13px;
           display: none; transition: opacity .2s ease; border: 1px solid transparent;
-          border-left-width: 3px; backdrop-filter: blur(6px); white-space: pre-line;
+          border-left-width: 3px; white-space: pre-line;
           max-height: min(38vh, 180px); overflow-y: auto; overscroll-behavior: contain;
           position: relative; }
 .banner.show { display: block; }
@@ -907,8 +921,8 @@ details > summary { cursor: pointer; color: var(--muted); font-size: 12.5px; }
 
   // liftMenuCard 在菜单展开时把所在卡片抬到后续卡片之上。
   //
-  // 卡片带 backdrop-filter，自成层叠上下文，后出现的卡片永远画在
-  // 前面卡片之上；菜单绝对定位溢出卡片时会被下面的卡片遮住。
+  // 卡片本身不是层叠上下文，但菜单是绝对定位 + z-index:20，跨卡片溢出时
+  // 会被后续卡片的内容盖住；抬升所在卡片保证菜单完整可见。
   function liftMenuCard(menu, open) {
     var card = menu && menu.closest ? menu.closest(".card") : null;
     if (card) card.classList.toggle("menu-open", !!open);
@@ -1326,7 +1340,9 @@ details > summary { cursor: pointer; color: var(--muted); font-size: 12.5px; }
           // 阈值着色：剩余 >=50% 绿 / 20~50% 琥珀 / <20% 红（该列显示的即剩余比例）。
           var bar = el("span", null, ratio >= 0.5 ? "bar" : (ratio >= 0.2 ? "bar warn" : "bar err"));
           var fill = el("i");
-          fill.style.width = Math.round(ratio * 100) + "%";
+          // 用 scaleX 而不是 width：宽度变化会触发整行 layout + paint，
+          // 一排仪表同时刷新就是几十次重排；scaleX 只交给合成器。
+          fill.style.transform = "scaleX(" + Math.max(0, Math.min(1, ratio)).toFixed(4) + ")";
           bar.appendChild(fill);
           barCell.appendChild(bar);
         }
