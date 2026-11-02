@@ -64,6 +64,20 @@ func (a *App) handleModelForAuth(request []byte) ([]byte, error) {
 	}
 	models, errModels := core.ModelsFor(vendor, ctx, credential)
 	if errModels != nil {
+		// 探测失败 ≠ 该凭证没有模型。进程内模型缓存挂在 App 实例上，热重载后
+		// 随旧实例一起消失，宿主重新加载每个凭证都会现场探测一轮；上游一次抖动
+		// （429、超时、瞬时 5xx）就会让整家供应商从 /v1/models 上消失，只能手动
+		// 重存设置才恢复。这里回落到 state.json 里最近一次成功的清单，把「瞬时
+		// 失败」与「凭证真的不可用」分开——后者由供应商返回空清单表达，不走这里。
+		// 计费通道类供应商（core.ModelFallbackVeto）例外：那份清单即权限判据，
+		// 探测失败必须如实报空。
+		if cached := a.models.Registered(vendor.ID()); len(cached) > 0 && !core.VetoesModelFallback(vendor) {
+			logger.Info("按授权查模型：%s 探测失败，回落到缓存 %d 个模型：%v",
+				vendor.ID(), len(cached), errModels)
+			models, errModels = cached, nil
+		}
+	}
+	if errModels != nil {
 		logger.Debug("按授权查模型：%s 探测模型失败：%v", vendor.ID(), errModels)
 		return core.OKEnvelope(pluginapi.ModelResponse{Provider: providerKey})
 	}

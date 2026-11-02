@@ -69,6 +69,12 @@ func (v *adapter) fetchModels(ctx context.Context, cred *Credential) ([]Model, e
 	return parseBuiltinModels(body)
 }
 
+// VetoModelFallback 实现 core.ModelFallbackVeto。
+//
+// 积分通道下这份清单就是「能推哪些模型」的判据，探测失败必须如实返回空：
+// 回落到上次的清单等于继续推广可能已无权限的模型。
+func (v *adapter) VetoModelFallback() bool { return v.creditEnabled.Load() }
+
 // Instances 构造 CodeArts 实例（单一部署，国内区）。
 func Instances(env core.Env) []core.Vendor {
 	return []core.Vendor{&adapter{NativeAdapter: core.NewNativeAdapter(core.NativeSpec[*Credential]{
