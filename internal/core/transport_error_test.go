@@ -125,3 +125,26 @@ func TestToPluginErrorTransport(t *testing.T) {
 		}
 	}
 }
+
+func TestHTTPStatusCredentialKindsOverride(t *testing.T) {
+	// 上游把账号级故障包在 400 / 200 里时，仍要按凭证侧结论上报：
+	// 400 命中不了宿主的冷却分支，被封账号会每轮被重新选中。
+	tests := []struct {
+		name string
+		fail *Failure
+		want int
+	}{
+		{name: "account_fault 400 → 403", fail: &Failure{Kind: FailureKindAccountFault, Status: 400}, want: 403},
+		{name: "account_fault 200 → 403", fail: &Failure{Kind: FailureKindAccountFault, Status: 200}, want: 403},
+
+		{name: "普通 400 原样", fail: &Failure{Kind: FailureKindClient, Status: 400}, want: 400},
+		{name: "429 原样", fail: &Failure{Kind: FailureKindSoftRate, Status: 429}, want: 429},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.fail.HTTPStatus(); got != tt.want {
+				t.Fatalf("HTTPStatus = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}

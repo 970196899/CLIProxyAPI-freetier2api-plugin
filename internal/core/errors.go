@@ -382,6 +382,13 @@ func (e *Failure) HTTPStatus() int {
 	if e == nil {
 		return http.StatusBadGateway
 	}
+	// 账号级故障常被上游包在 400（甚至 200 的 SSE 错误帧）里返回，透传原始
+	// 状态码会让宿主错过冷却分支，被封账号于是每轮都被重新选中。
+	// 只对 account_fault 强制 403：session_dead 的原始状态码另有语义
+	// （zcode 的 403 要保留，宿主据此走软冷却而非刷新凭证）。
+	if e.Kind == FailureKindAccountFault {
+		return http.StatusForbidden
+	}
 	// 只有真正的错误状态才算数：上游把业务错误塞进 200/206 的包体（SSE 错误帧
 	// 最常见）时，透传 2xx 会让宿主把「账号被封」当成成功状态码——冷却分支
 	// 命中不了，凭证就每轮都被重新选中。这类一律按 Kind 推导。
@@ -395,10 +402,6 @@ func (e *Failure) HTTPStatus() int {
 		return http.StatusTooManyRequests
 	case FailureKindSessionDead, FailureKindCredential:
 		return http.StatusUnauthorized
-	case FailureKindAccountFault:
-		// 账号级故障（被封/受限）按 403 报：宿主对它做 30 分钟软冷却，
-		// 而 400/401 要么不冷却、要么触发无意义的刷新。
-		return http.StatusForbidden
 	case FailureKindNotFound, FailureKindModelBlocked:
 		return http.StatusNotFound
 	case FailureKindServer, FailureKindTransient:
