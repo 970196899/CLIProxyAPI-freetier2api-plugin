@@ -552,6 +552,7 @@ func (r *runtime) configure(settings core.Settings, raw map[string]string) {
 	cfg.passthroughIP = ParseBool(raw["workbuddy_passthrough_ip"], false)
 	cfg.stateDir = settings.StateDir
 
+	// 下列覆盖键已不再对外声明（面板不显示），保留读取只为兼容旧配置。
 	if value := strings.TrimSpace(raw["workbuddy_user_agent"]); value != "" {
 		cfg.userAgent = value
 	}
@@ -593,12 +594,6 @@ func (r *runtime) options(ctx context.Context) Options {
 func (v *adapter) ConfigFields() []pluginapi.ConfigField {
 	return []pluginapi.ConfigField{
 		{Name: "workbuddy_passthrough_ip", Type: pluginapi.ConfigFieldTypeBoolean, Description: "是否透传客户端 IP，默认关闭。"},
-		{Name: "workbuddy_user_agent", Type: pluginapi.ConfigFieldTypeString, Description: "出站 User-Agent 覆盖。"},
-		{Name: "workbuddy_client_version", Type: pluginapi.ConfigFieldTypeString, Description: "UA 中 WorkBuddy 版本段。"},
-		{Name: "workbuddy_cli_version", Type: pluginapi.ConfigFieldTypeString, Description: "UA 中 CLI 版本段。"},
-		{Name: "workbuddy_client_name", Type: pluginapi.ConfigFieldTypeString, Description: "归属头客户端名。"},
-		{Name: "workbuddy_device_token", Type: pluginapi.ConfigFieldTypeString, Description: "X-Device-Token 全局兜底。"},
-		{Name: "workbuddy_device_token_file", Type: pluginapi.ConfigFieldTypeString, Description: "设备令牌文件路径。"},
 	}
 }
 
