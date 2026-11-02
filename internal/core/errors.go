@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -71,7 +72,117 @@ func ToPluginError(err error) error {
 		pluginErr.RetryAfterSeconds = retryAfterSeconds(err)
 		return pluginErr
 	}
+	// 宿主 HTTP 桥（host.http.do / do_stream）在非 2xx 时把整个响应折叠成一条
+	// RPC 错误文本，插件拿不到 http.Response。这类错误必须按文本还原状态码：
+	// 否则 429 会被当成普通传输故障报 502，宿主不做限流冷却，客户端还会拿到
+	// 500（实测 workbuddyglobal 429 → 客户端 internal_server_error）。
+	if failure := classifyTransportError(err); failure != nil {
+		status := failure.HTTPStatus()
+		code := upstreamCode(failure.Kind.String())
+		if failure.Retryable() {
+			return RetryablePluginError(code, failure.Msg, status)
+		}
+		return NewPluginError(code, failure.Msg, status)
+	}
 	return RetryablePluginError("upstream_request_failed", err.Error(), http.StatusBadGateway)
+}
+
+// transportStatusHints 是宿主桥错误文本里出现的状态短语到状态码的映射。
+//
+// 顺序敏感：长短语在前，避免 "Request Entity Too Large" 先被更短的短语吃掉。
+var transportStatusHints = []struct {
+	marker string
+	status int
+}{
+	{"Request Entity Too Large", http.StatusRequestEntityTooLarge},
+	{"Service Unavailable", http.StatusServiceUnavailable},
+	{"Gateway Timeout", http.StatusGatewayTimeout},
+	{"Too Many Requests", http.StatusTooManyRequests},
+	{"Payment Required", http.StatusPaymentRequired},
+	{"Unauthorized", http.StatusUnauthorized},
+	{"Bad Gateway", http.StatusBadGateway},
+	{"Forbidden", http.StatusForbidden},
+	{"Not Found", http.StatusNotFound},
+	{"Bad Request", http.StatusBadRequest},
+}
+
+// classifyTransportError 把宿主 HTTP 桥的传输层错误还原成分类错误。
+//
+// 只处理带桥标记（host.http.do* / host_call_failed）的错误：普通错误里出现
+// "not found" 之类的字面量（例如本地文件缺失）不该被误判成上游 404。
+// 返回的 Msg 已剥掉 host.http.do_stream: host_call_failed: execute host http request:
+// 这类内部前缀，只留下「上游 HTTP 429 Too Many Requests（host）」。
+func classifyTransportError(err error) *Failure {
+	if err == nil {
+		return nil
+	}
+	message := err.Error()
+	if !strings.Contains(message, "host.http.do") && !strings.Contains(message, "host_call_failed") {
+		return nil
+	}
+	status := 0
+	for _, hint := range transportStatusHints {
+		if strings.Contains(message, hint.marker) {
+			status = hint.status
+			break
+		}
+	}
+	if status == 0 {
+		return nil
+	}
+	return &Failure{Kind: transportKind(status), Status: status, Msg: transportMessage(status, message)}
+}
+
+// transportKind 把还原出的状态码映射成可处置分类。
+func transportKind(status int) FailureKind {
+	switch status {
+	case http.StatusTooManyRequests:
+		return FailureKindSoftRate
+	case http.StatusUnauthorized:
+		return FailureKindCredential
+	case http.StatusPaymentRequired:
+		return FailureKindHardCredit
+	case http.StatusForbidden:
+		return FailureKindWAFBlock
+	case http.StatusNotFound:
+		return FailureKindNotFound
+	case http.StatusBadRequest, http.StatusRequestEntityTooLarge:
+		return FailureKindBadParams
+	case http.StatusServiceUnavailable:
+		return FailureKindBusy
+	default:
+		return FailureKindTransient
+	}
+}
+
+// transportMessage 生成给下游看的上游错误描述，附上被请求的上游主机便于定位。
+func transportMessage(status int, raw string) string {
+	message := fmt.Sprintf("上游 HTTP %d %s", status, http.StatusText(status))
+	if host := transportHost(raw); host != "" {
+		message = fmt.Sprintf("%s（%s）", message, host)
+	}
+	return message
+}
+
+// transportHost 从 Go http.Client 的错误文本里取出上游主机名。
+//
+// 典型形态：Post "https://www.workbuddy.ai/v2/chat/completions": Too Many Requests
+func transportHost(raw string) string {
+	for _, verb := range []string{`Post "`, `Get "`, `Put "`, `Patch "`, `Delete "`} {
+		start := strings.Index(raw, verb)
+		if start < 0 {
+			continue
+		}
+		rest := raw[start+len(verb):]
+		end := strings.IndexByte(rest, '"')
+		if end <= 0 {
+			continue
+		}
+		if parsed, errParse := url.Parse(rest[:end]); errParse == nil && parsed.Host != "" {
+			return parsed.Host
+		}
+	}
+	return ""
 }
 
 // retryAfterSeconds 取出上游明示的等待秒数（向上取整）。
@@ -271,7 +382,10 @@ func (e *Failure) HTTPStatus() int {
 	if e == nil {
 		return http.StatusBadGateway
 	}
-	if e.Status > 0 {
+	// 只有真正的错误状态才算数：上游把业务错误塞进 200/206 的包体（SSE 错误帧
+	// 最常见）时，透传 2xx 会让宿主把「账号被封」当成成功状态码——冷却分支
+	// 命中不了，凭证就每轮都被重新选中。这类一律按 Kind 推导。
+	if e.Status >= http.StatusBadRequest {
 		return e.Status
 	}
 	switch e.Kind {
@@ -281,6 +395,10 @@ func (e *Failure) HTTPStatus() int {
 		return http.StatusTooManyRequests
 	case FailureKindSessionDead, FailureKindCredential:
 		return http.StatusUnauthorized
+	case FailureKindAccountFault:
+		// 账号级故障（被封/受限）按 403 报：宿主对它做 30 分钟软冷却，
+		// 而 400/401 要么不冷却、要么触发无意义的刷新。
+		return http.StatusForbidden
 	case FailureKindNotFound, FailureKindModelBlocked:
 		return http.StatusNotFound
 	case FailureKindServer, FailureKindTransient:
