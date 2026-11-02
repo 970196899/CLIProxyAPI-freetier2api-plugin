@@ -53,3 +53,24 @@ func TestConsolePageShowsQuotaFailureReason(t *testing.T) {
 		}
 	}
 }
+
+// TestConsolePageShowsPendingGrant 锁住「已领取、未生效的活动额度」的展示出口。
+//
+// 上游在授予生效前不建额度桶，这部分进不了 remain / total；页面若不单独显示，
+// 用户领到的几亿在账号表上没有任何痕迹，只能以为没到账。
+func TestConsolePageShowsPendingGrant(t *testing.T) {
+	page := Page("/plugins/freetier")
+
+	for _, literal := range []string{
+		`if (metrics[i] && metrics[i].key === "pending") return metrics[i].value;`,
+		`var pendingTag = el("span", " 待生效 " + pending, "muted");`,
+	} {
+		if !strings.Contains(page, literal) {
+			t.Fatalf("console page is missing the pending-grant display (%s)", literal)
+		}
+	}
+	// 待生效额度不得被算进页头的剩余 / 总额。
+	if strings.Contains(page, "quota.remain + pending") {
+		t.Fatal("pending grant must not be added into remain")
+	}
+}

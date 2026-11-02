@@ -194,6 +194,13 @@ func (v *adapter) fetchQuota(ctx context.Context, cred *Credential) (*pluginapi.
 			response.Summary = append(response.Summary, metrics...)
 			response.Groups = append(response.Groups, groups...)
 		}
+	} else if metrics, groups := pendingGrantQuota(snapshot.plans, snapshot.serverTime, snapshot.balances); len(metrics) > 0 {
+		// 日常桶已经有数字时 balances 非空，上面那条兜底按契约不会参与；
+		// 而活动授予在 effective_at 之前同样没有桶。「日常桶 + 一笔还没生效的
+		// 活动授予」正是最常见的组合，只按「有没有桶」判断，就会让领到的几亿
+		// 在页面上完全不存在。
+		response.Summary = append(response.Summary, metrics...)
+		response.Groups = append(response.Groups, groups...)
 	}
 	return response, nil
 }
@@ -723,6 +730,69 @@ func planGrantQuota(plans []map[string]any, serverTime int64) ([]pluginapi.Quota
 		{Key: "total", Label: "总额度", Value: total},
 	}
 	return metrics, []pluginapi.QuotaGroup{group}
+}
+
+// pendingGrantQuota 展示「已授予、尚未生效」的那部分额度。
+//
+// 日常桶已经给了数字时 balances 非空，planGrantQuota 按契约不参与兜底；而活动
+// 授予在 effective_at 之前同样不会生成桶。只按「有没有桶」判断，就会把「日常
+// 桶 + 一笔还没生效的活动授予」这种最常见的组合漏掉——领到的几亿在页面上一个
+// 数都没有，用户只能以为没到账。
+//
+// 指标键刻意用 pending 而不是 remaining/total：页头那两个数必须继续反映当前
+// 真正可用的额度，把还没生效的授予算进去会让人以为现在就能用。
+func pendingGrantQuota(plans []map[string]any, serverTime int64, balances []map[string]any) ([]pluginapi.QuotaMetric, []pluginapi.QuotaGroup) {
+	bucketed := bucketedEntitlements(balances)
+	seen := map[string]bool{}
+	group := pluginapi.QuotaGroup{DisplayName: "待生效额度"}
+	var total float64
+	for _, candidate := range grantCandidatePlans(plans, serverTime) {
+		// 只报还没生效的那部分：已经生效的授予由 balances 桶自己说话，
+		// 再列一遍就是同一份额度出现两次。
+		if candidate.effectiveAt <= 0 {
+			continue
+		}
+		for _, grant := range parsePlanGrants(candidate.plan) {
+			if grant.Model == "" || grant.Units <= 0 {
+				continue
+			}
+			if grant.ID != "" && bucketed[grant.ID] {
+				continue
+			}
+			key := grant.ID
+			if key == "" {
+				key = grant.Model + "|" + formatTokens(grant.Units)
+			}
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			total += grant.Units
+			group.Buckets = append(group.Buckets, pluginapi.QuotaBucket{
+				Window:            grant.Model,
+				RemainingFraction: 1,
+				Description:       formatTokens(grant.Units) + " tokens，" + time.Unix(candidate.effectiveAt, 0).UTC().Format(time.RFC3339) + " 生效",
+			})
+		}
+	}
+	if total <= 0 {
+		return nil, nil
+	}
+	return []pluginapi.QuotaMetric{{Key: "pending", Label: "待生效额度", Value: total}}, []pluginapi.QuotaGroup{group}
+}
+
+// bucketedEntitlements 收集 balances 里已经有额度桶的 entitlement_id。
+//
+// 用 ID 而不是「模型 + 额度」比对：同模型可能同时存在日常桶与活动桶，
+// 按名字比对会把另一份真实授予吞掉。
+func bucketedEntitlements(balances []map[string]any) map[string]bool {
+	ids := make(map[string]bool, len(balances))
+	for _, bucket := range balances {
+		if id := core.RawStringField(bucket, "entitlement_id"); id != "" {
+			ids[id] = true
+		}
+	}
+	return ids
 }
 
 // grantCandidate 是参与额度兜底的套餐及其「最早未生效授予时刻」。

@@ -767,6 +767,18 @@ details > summary { cursor: pointer; color: var(--muted); font-size: 12.5px; }
     return flat.length > 42 ? flat.slice(0, 42) + "…" : flat;
   }
 
+  // pendingQuota 取「已领取、尚未生效」的额度（后端 metric key = pending）。
+  //
+  // 上游在授予生效前不建额度桶，所以这部分不会出现在 remain / total 里；
+  // 不单独显示，用户领到的几亿在页面上就没有任何痕迹。
+  function pendingQuota(quota) {
+    var metrics = (quota && quota.metrics) || [];
+    for (var i = 0; i < metrics.length; i++) {
+      if (metrics[i] && metrics[i].key === "pending") return metrics[i].value;
+    }
+    return 0;
+  }
+
   // vendorChipClass 把供应商标识哈希到 v0..v5，交给 CSS 上彩色芯片底色。
   // 优先用 vendor_id：展示名可以改，用名字哈希会让芯片颜色跟着变。
   function vendorChipClass(vendorID, label) {
@@ -1329,6 +1341,14 @@ details > summary { cursor: pointer; color: var(--muted); font-size: 12.5px; }
             "：" + (quota.stale_reason || "原因未知");
         }
         row.appendChild(remainCell);
+        // 待生效的活动授予跟在「剩余 / 总额」后面：它已经领到但还没进桶，
+        // 既不能算进上面两个数（会让人以为现在就能用），也不能不显示。
+        var pending = pendingQuota(quota);
+        if (pending > 0) {
+          var pendingTag = el("span", " 待生效 " + pending, "muted");
+          pendingTag.title = "已领取的活动额度，生效后并入上面的剩余 / 总额";
+          remainCell.appendChild(pendingTag);
+        }
         // 分母守卫：has_total 只说明上游报了总额键，不保证它大于 0。
         // CodeArts 未开通福利、Qoder 的 0/0 桶都会给出 total=0。此时既不能
         // 相除（NaN%），也不能按 0% 画一条红色空槽——红槽读起来像「额度已经

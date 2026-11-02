@@ -934,3 +934,74 @@ func TestActivePlansNormalizesMillisecondTimestamps(t *testing.T) {
 		t.Fatalf("serverSeconds = %d, want 1792900000", got)
 	}
 }
+
+// TestPendingGrantQuotaShowsClaimedButInactiveGrant 锁住「日常桶有数字、活动授予
+// 还没生效」这种最常见的漏显。
+//
+// 真实响应（zcodecn / zcodeglobal，2026-11-02）里 balances 只有日常 3M + 5M 两个
+// 桶，领到的 3 亿写在 plans[].entitlements 且 effective_at 在未来。旧逻辑只在
+// 「一个桶都没有」时才拿授予兜底，于是这笔 3 亿在页面上完全不存在。
+func TestPendingGrantQuotaShowsClaimedButInactiveGrant(t *testing.T) {
+	plans := []map[string]any{
+		{
+			"plan_id": "zcode-v3-start-plan-1102",
+			"name":    "ZCODE GLOBAL BUILD",
+			"status":  "active",
+			"ends_at": float64(1793667600),
+			"entitlements": []any{map[string]any{
+				"entitlement_id": "ent-zcode-v3-start-plan-1102-1",
+				"show_name":      "GLM-5.3-Flash",
+				"meter":          "model_usage",
+				"unit_type":      "token",
+				"grant_units":    float64(300000000),
+				"period":         "one_time",
+				"effective_at":   float64(1793631600),
+			}},
+		},
+		{
+			"plan_id": "zcode-v3-start-plan-0817",
+			"name":    "ZCode Start Plan",
+			"status":  "active",
+			"ends_at": float64(1793980799),
+			"entitlements": []any{
+				map[string]any{"entitlement_id": "ent_2_0817_glm_5p3", "show_name": "GLM-5.3", "meter": "model_usage", "unit_type": "token", "grant_units": float64(3000000), "period": "daily"},
+				map[string]any{"entitlement_id": "ent_2_0817_glm_5p3f", "show_name": "GLM-5.3-Flash", "meter": "model_usage", "unit_type": "token", "grant_units": float64(5000000), "period": "daily"},
+			},
+		},
+	}
+	balances := []map[string]any{
+		{"entitlement_id": "ent_2_0817_glm_5p3", "show_name": "GLM-5.3", "total_units": float64(3000000), "remaining_units": float64(3000000)},
+		{"entitlement_id": "ent_2_0817_glm_5p3f", "show_name": "GLM-5.3-Flash", "total_units": float64(5000000), "remaining_units": float64(5000000)},
+	}
+
+	metrics, groups := pendingGrantQuota(plans, int64(1793620307), balances)
+	if v, ok := metricValue(metrics, "pending"); !ok || v != 300000000 {
+		t.Fatalf("待生效额度应为 3 亿: %+v", metrics)
+	}
+	// 页头那两个数必须继续反映当前可用额度，不能被还没生效的授予污染。
+	if _, ok := metricValue(metrics, "total"); ok {
+		t.Fatalf("待生效额度不得写进 total: %+v", metrics)
+	}
+	if len(groups) != 1 || len(groups[0].Buckets) != 1 {
+		t.Fatalf("窗口组错误: %+v", groups)
+	}
+	if !strings.Contains(groups[0].Buckets[0].Description, "生效") {
+		t.Fatalf("应注明生效时刻: %q", groups[0].Buckets[0].Description)
+	}
+
+	// 已经有额度桶的授予不再重复展示。
+	effective := []map[string]any{{
+		"status": "active",
+		"entitlements": []any{map[string]any{
+			"entitlement_id": "ent-live", "show_name": "GLM-5.3", "meter": "model_usage",
+			"unit_type": "token", "grant_units": float64(100), "effective_at": float64(200),
+		}},
+	}}
+	if m, _ := pendingGrantQuota(effective, 100, []map[string]any{{"entitlement_id": "ent-live"}}); len(m) != 0 {
+		t.Fatalf("已有额度桶的授予不应重复展示: %+v", m)
+	}
+	// 已生效（无未来生效时刻）的授予由 balances 负责，这里不报。
+	if m, _ := pendingGrantQuota(effective, 300, nil); len(m) != 0 {
+		t.Fatalf("已生效的授予不应进待生效: %+v", m)
+	}
+}
