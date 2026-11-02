@@ -255,6 +255,10 @@ func TestAuthorizeURL(t *testing.T) {
 	if !strings.HasPrefix(got, "https://x.test/code/authorize?") || !strings.Contains(got, "state=st") {
 		t.Fatalf("AuthorizeURLWith = %q", got)
 	}
+	// 官方页面只认 appname（无下划线）：写成 app_name 会让换票拿到 200035。
+	if !strings.Contains(got, "appname=") || strings.Contains(got, "app_name=") {
+		t.Fatalf("AuthorizeURLWith 缺少 appname 参数: %q", got)
+	}
 }
 
 func TestClassifyByStatusAndText(t *testing.T) {

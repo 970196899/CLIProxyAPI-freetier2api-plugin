@@ -342,7 +342,10 @@ func (v *adapter) LoginPoll(ctx context.Context, state string) (*pluginapi.AuthL
 		return &pluginapi.AuthLoginPollResponse{Status: pluginapi.AuthLoginStatusPending}, nil
 	}
 	plan := FetchPlanName(ctx, result.Token, result.Region)
-	storage, cred := BuildLoginStorage(result.Region, result.Token, result.RefreshToken, result.Profile, plan)
+	// 设备身份：登录这台机器上若装过官方客户端，直接把 runtime-info 签发的
+	// machineToken/machineType 写进凭证——国际版活动按它精确校验，缺了就只能
+	// 看到「无可用签到活动」。
+	storage, cred := BuildLoginStorage(result.Region, result.Token, result.RefreshToken, result.Profile, plan, v.localMachineIdentity())
 	authID := LoginAuthID(result.Profile, state)
 	fileName := core.FileNameFor(v.ID(), strings.TrimPrefix(authID, "qoder-"))
 	logger.Info("qoder 登录完成（供应商=%s 邮箱=%s）", v.ID(), cred.Email)

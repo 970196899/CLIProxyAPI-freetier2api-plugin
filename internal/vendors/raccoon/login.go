@@ -196,13 +196,16 @@ func ParseCallbackCode(raw string) (code, state string, ok bool) {
 	return code, query.Get("state"), code != ""
 }
 
-// AuthorizeURLWith 构造官方授权页 URL（panel 的 AuthorizeURL 口径：
-// login_source=desktop & client=desktop & app_name=<中文客户端名>）。
+// AuthorizeURLWith 构造官方授权页 URL。
+//
+// 参数名必须与官方桌面客户端逐字一致：login_source=desktop & appname=<中文
+// 客户端名> & state=<state>。早期实现写的是 app_name（带下划线）并多带一个
+// client=desktop——官方页面认的是 appname，缺了它换票会拿到
+// 「authorization code not found」（200035），表现就是「授权完登录不成功」。
 func AuthorizeURLWith(origin, appName, state string) string {
 	query := url.Values{}
 	query.Set("login_source", "desktop")
-	query.Set("client", "desktop")
-	query.Set("app_name", appName)
+	query.Set("appname", appName)
 	if strings.TrimSpace(state) != "" {
 		query.Set("state", state)
 	}
