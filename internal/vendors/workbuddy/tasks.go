@@ -1752,7 +1752,7 @@ func (v *adapter) RunScheduled(ctx context.Context, cred *core.Credential, kind 
 		}
 		return checkActivityStreak(ctx, client, native), nil
 	case TaskKindTravel:
-		return RunTravel(ctx, client, native), nil
+		return RunTravel(ctx, client, native)
 	case TaskKindBlackcat:
 		if !InNightWindow(time.Now()) {
 			return "", nil
@@ -1794,7 +1794,7 @@ func runChatFive(ctx context.Context, client *Client, credential *Credential) (s
 }
 
 func runFirstBuddy(ctx context.Context, client *Client, credential *Credential) (string, error) {
-	return RunTravel(ctx, client, credential), nil
+	return RunTravel(ctx, client, credential)
 }
 
 func runModelChat(ctx context.Context, client *Client, credential *Credential) (string, error) {
@@ -2302,40 +2302,40 @@ func makeupYesterday(ctx context.Context, client *Client, credential *Credential
 // RunTravel 执行单账号猫猫旅行的一个动作。
 //
 // 状态机：无猫 → 领养；有猫 → 按 status 分派（idle 派出 / arrived 领奖 / traveling 跳过）。
-func RunTravel(ctx context.Context, client *Client, credential *Credential) string {
+func RunTravel(ctx context.Context, client *Client, credential *Credential) (string, error) {
 	info, errInfo := client.BuddyInfo(ctx, credential)
 	if errInfo != nil {
-		return ""
+		return "", errInfo
 	}
 	if !info.HasBuddy {
-		return adoptBuddy(ctx, client, credential)
+		return adoptBuddy(ctx, client, credential), nil
 	}
 
 	status, errStatus := client.TravelStatus(ctx, credential)
 	if errStatus != nil {
-		return ""
+		return "", errStatus
 	}
 	switch status.State {
 	case "arrived":
 		if status.RecordID <= 0 {
-			return ""
+			return "", nil
 		}
 		credit, errClaim := client.TravelClaim(ctx, credential, status.RecordID)
 		if errClaim != nil {
-			return ""
+			return "", errClaim
 		}
-		return fmt.Sprintf("旅行领奖 +%d", credit)
+		return fmt.Sprintf("旅行领奖 +%d", credit), nil
 	case "idle":
 		if status.DailyLimitReached {
-			return ""
+			return "", nil
 		}
 		if errDepart := client.TravelDepart(ctx, credential, travelLocationID); errDepart != nil {
-			return ""
+			return "", errDepart
 		}
-		return "派出旅行"
+		return "派出旅行", nil
 	default:
 		// traveling 或未知状态：本轮不做动作。
-		return ""
+		return "", nil
 	}
 }
 
@@ -2383,13 +2383,14 @@ func RunBlackcat(ctx context.Context, client *Client, credential *Credential) (s
 		return "", nil
 	}
 	completed := int64(0)
+	var errChat error
 	for index := int64(0); index < need; index++ {
 		conversationID := fmt.Sprintf("wb2api-night-%d-%d", nowUnixMs(), index)
 		// 真实对话：上游要求夜猫子判据是「窗口内的真实 glm-5.2 对话」。
-		if errChat := client.DesktopChat(ctx, credential, "", "glm-5.2", "GLM-5.2", conversationID); errChat != nil {
+		if errChat = client.DesktopChat(ctx, credential, "", "glm-5.2", "GLM-5.2", conversationID); errChat != nil {
 			break
 		}
-		if errReport := client.ReportChatActivity(ctx, credential, conversationID, "", "glm-5.2", "GLM-5.2"); errReport != nil {
+		if errChat = client.ReportChatActivity(ctx, credential, conversationID, "", "glm-5.2", "GLM-5.2"); errChat != nil {
 			break
 		}
 		completed++
@@ -2398,7 +2399,9 @@ func RunBlackcat(ctx context.Context, client *Client, credential *Credential) (s
 		}
 	}
 	if completed == 0 {
-		return "", nil
+		// 一次都没跑成要把错误交回去：折成空字符串会让上层显示「0 个账号」，
+		// 看起来像无事可做，实际是上游拒了。
+		return "", errChat
 	}
 	return fmt.Sprintf("夜间对话 %d 次", completed), nil
 }
@@ -2423,6 +2426,9 @@ func RunSchool(ctx context.Context, client *Client, credential *Credential) (str
 	}
 
 	completed := 0
+	// 逐任务失败不再静默 continue：一次都没跑成时必须把原因交回上层，
+	// 否则排程日志只显示「0 个账号」，看不出是活动没开还是被上游拒了。
+	var errFirst error
 	for _, task := range status.Tasks {
 		switch task.Code {
 		case "task_student_verify":
@@ -2434,9 +2440,15 @@ func RunSchool(ctx context.Context, client *Client, credential *Credential) (str
 		}
 		// viewed 是计数前置：未激活的任务，后续行为事件不计分。
 		if errView := client.SchoolTaskViewed(ctx, credential, task.Code); errView != nil {
+			if errFirst == nil {
+				errFirst = fmt.Errorf("%s: %w", task.Code, errView)
+			}
 			continue
 		}
 		if errRun := runSchoolTask(ctx, client, credential, task.Code); errRun != nil {
+			if errFirst == nil {
+				errFirst = fmt.Errorf("%s: %w", task.Code, errRun)
+			}
 			continue
 		}
 		// 等异步计分落定再领奖。
@@ -2444,6 +2456,9 @@ func RunSchool(ctx context.Context, client *Client, credential *Credential) (str
 			continue
 		}
 		if _, errClaim := client.SchoolTaskClaim(ctx, credential, task.Code); errClaim != nil {
+			if errFirst == nil {
+				errFirst = fmt.Errorf("%s: %w", task.Code, errClaim)
+			}
 			continue
 		}
 		completed++
@@ -2463,7 +2478,7 @@ func RunSchool(ctx context.Context, client *Client, credential *Credential) (str
 		}
 	}
 	if completed == 0 && drawn == 0 {
-		return "", nil
+		return "", errFirst
 	}
 	return fmt.Sprintf("完成 %d 个任务、抽奖 %d 次", completed, drawn), nil
 }

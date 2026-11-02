@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"freetier2api-plugin/cpasdk/pluginapi"
@@ -669,7 +670,7 @@ func (s *Service) runForAccounts(
 			OK:     false, Message: failure.Message,
 		})
 	}
-	jobResults := auth.RunBatch(loaded, batchConcurrency, func(current auth.Account) accountActionResult {
+	jobResults := runGroupedBatch(ctx, loaded, batchConcurrency, batchAccountGap, func(current auth.Account) accountActionResult {
 		result := accountActionResult{
 			AuthID:   core.FirstNonEmpty(current.Entry.ID, current.Entry.Name),
 			Label:    core.FirstNonEmpty(current.Credential.LabelValue(), current.Entry.Label),
@@ -692,6 +693,61 @@ func (s *Service) runForAccounts(
 		return result
 	})
 	return append(results, jobResults...)
+}
+
+// batchAccountGap 是同厂商账号之间的间隔。
+//
+// 上游 WAF 看的是同 IP 的突发速率，不看你有几个账号：6 路并发、零间隔的
+// 批量在实测里一次点击就把三个厂商同时打进 429（8 个账号挂掉 7 个）。定时
+// 路径一直是串行 + accountGap，从没出过这个问题——两条路径不该有两套节奏。
+// 跨厂商并发保留，总耗时基本不变，同厂商的峰值降到 1 路。
+const batchAccountGap = 600 * time.Millisecond
+
+// runGroupedBatch 按厂商分组执行动作：组间并发（上限 groups），组内串行并留间隔。
+//
+// 返回值与 accounts 下标对齐，调用方按原顺序呈现即可。
+func runGroupedBatch(
+	ctx context.Context,
+	accounts []auth.Account,
+	groups int,
+	gap time.Duration,
+	run func(auth.Account) accountActionResult,
+) []accountActionResult {
+	if groups < 1 {
+		groups = 1
+	}
+	order := make([]string, 0, 4)
+	byVendor := make(map[string][]int, 4)
+	for index, account := range accounts {
+		vendor := account.Vendor.ID()
+		if _, seen := byVendor[vendor]; !seen {
+			order = append(order, vendor)
+		}
+		byVendor[vendor] = append(byVendor[vendor], index)
+	}
+	results := make([]accountActionResult, len(accounts))
+	limit := make(chan struct{}, groups)
+	var wg sync.WaitGroup
+	for _, vendor := range order {
+		wg.Add(1)
+		go func(indices []int) {
+			defer wg.Done()
+			limit <- struct{}{}
+			defer func() { <-limit }()
+			for position, index := range indices {
+				if position > 0 && !core.SleepContext(ctx, gap) {
+					// ctx 取消后不再往下打上游：剩下的账号只标取消，不发请求。
+					for _, rest := range indices[position:] {
+						results[rest] = accountActionResult{Message: "已取消"}
+					}
+					return
+				}
+				results[index] = run(accounts[index])
+			}
+		}(byVendor[vendor])
+	}
+	wg.Wait()
+	return results
 }
 
 // runWithAuthRetry 在动作因凭证过期（401）失败时，刷新一次凭证再重试。

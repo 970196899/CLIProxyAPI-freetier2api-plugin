@@ -311,25 +311,40 @@ func (s *Service) runCheckinAll(ctx context.Context) {
 // 落盘」只有一份实现，供应商包也不必依赖 internal/hostbridge。
 func (s *Service) runScheduledFamily(ctx context.Context, kind string) {
 	logger.Info("%s: starting for all accounts", kind)
-	count := 0
+	done, idle, failed := 0, 0, 0
 	s.forEachAccount(ctx, "", nil, func(ctx context.Context, account *accountContext) error {
 		if kind == core.TaskKindKeepalive {
 			result := s.keepaliveOne(ctx, "", account)
 			if !result.OK {
 				logger.Error("%s %s: %s", kind, account.label(), result.Message)
+				failed++
 				return nil
 			}
 			logger.Info("%s %s: %s", kind, account.label(), result.Message)
-			count++
+			done++
 			return nil
 		}
-		if message := s.runScheduledForAccount(ctx, account, kind); message != "" {
+		message, errRun := s.runScheduledForAccount(ctx, account, kind)
+		switch {
+		case errRun != nil:
+			logger.Error("%s %s: %v", kind, account.label(), errRun)
+			failed++
+		case message == "":
+			idle++
+		default:
 			logger.Info("%s %s: %s", kind, account.label(), message)
-			count++
+			done++
 		}
 		return nil
 	})
-	logger.Info("%s: finished for %d account(s)", kind, count)
+	// 「finished for 0 account(s)」曾经把「没事可做」和「全挂了」显示成同一个
+	// 数字：供应商的失败分支返回空字符串，计数不增也不报错。分开报，别让人
+	// 对着一个 0 猜今天到底跑没跑。
+	if idle > 0 || failed > 0 {
+		logger.Info("%s: finished for %d account(s)（无事可做 %d，失败 %d）", kind, done, idle, failed)
+		return
+	}
+	logger.Info("%s: finished for %d account(s)", kind, done)
 }
 
 // runScheduledForAccount 让账号所属供应商执行一个定时任务族，返回可读结果。
@@ -337,17 +352,15 @@ func (s *Service) runScheduledFamily(ctx context.Context, kind string) {
 // 排程是全局的（task_schedules 不区分供应商与账号），执行前必须按供应商声明的
 // TaskSpecs 过滤：未声明的族对它没有实现，静默跳过即可，不能落 ERROR——否则
 // 每到一个排程点就刷一条「unknown scheduled task kind」，把真实错误淹没（issue #58）。
-func (s *Service) runScheduledForAccount(ctx context.Context, account *accountContext, kind string) string {
+//
+// 返回值区分三态：message 非空 = 真做了事；message 空且 err 为 nil = 无事可做；
+// err 非空 = 失败。供应商不许把失败折成空字符串，那样上层只能瞎猜。
+func (s *Service) runScheduledForAccount(ctx context.Context, account *accountContext, kind string) (string, error) {
 	runner, okRunner := core.As[core.ScheduledRunner](account.vendor)
 	if !okRunner || !core.SupportsScheduledKind(account.vendor, kind) {
-		return ""
+		return "", nil
 	}
-	message, errRun := runner.RunScheduled(ctx, account.credential, kind)
-	if errRun != nil {
-		logger.Error("%s %s: %v", kind, account.label(), errRun)
-		return ""
-	}
-	return message
+	return runner.RunScheduled(ctx, account.credential, kind)
 }
 
 const (

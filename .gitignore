@@ -37,3 +37,7 @@ coverage.out
 # macOS
 **/.DS_Store
 *_TODO.md
+
+# cgo 中间产物（go build -buildmode=c-shared 的副产物）
+cgo-gcc-input-*.o
+*.o

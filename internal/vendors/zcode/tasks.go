@@ -625,7 +625,13 @@ func (v *adapter) fetchPlanSnapshot(ctx context.Context, cred *Credential) planS
 	if errPreview != nil || len(offered) == 0 {
 		marketing, errMarketing = queryMarketingTouch(ctx, cred)
 		if errMarketing != nil {
-			logger.Info("zcode 营销触达失败：%v", errMarketing)
+			// 429 是软限流：营销通道只是兜底，降级后页面照样能用，记 Debug
+			// 别把 info 日志刷满（实测每轮都撞）。其它错误才是真故障。
+			if core.IsRetryableFailure(errMarketing) {
+				logger.Debug("zcode 营销触达受限，已降级：%v", errMarketing)
+			} else {
+				logger.Error("zcode 营销触达失败：%v", errMarketing)
+			}
 		}
 	}
 	snapshot.offered, snapshot.errPreview = resolveOffers(offered, errPreview, marketing, errMarketing)
