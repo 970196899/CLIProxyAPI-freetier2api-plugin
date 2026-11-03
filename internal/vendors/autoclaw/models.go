@@ -5,8 +5,9 @@ package autoclaw
 // 清单来源（与 Agent2API 一致）：
 //   - global：GET {base}/autoclaw-proxy/proxy/autoclaw-model-config（实时目录，
 //     含 contextWindow / maxTokens / reasoning 等元数据）；
-//   - cn：静态表（沙箱 relay 通道的模型，上游无对应实时目录接口可从
-//     userapi 直接拉取；实时性以模型可用性实测为准）。
+//   - cn：同一条 /autoclaw-proxy/proxy/autoclaw-model-config 挂在 cn 基址下
+//     （2026-11-04 实测返回 200 + 5 个模型，与 global 同构），实时拉取；仅在
+//     实时失败时回退 staticCNModels 快照。
 //
 // 探测需要一把有效凭证；探测失败返回空清单而不是编造清单。
 
@@ -89,6 +90,13 @@ var cnStaticModels = []string{
 }
 
 // FetchModels 拉取区域模型清单。
+//
+// 两个区域都有实时目录：国际版与国内版共用同一条
+// /autoclaw-proxy/proxy/autoclaw-model-config（挂在各自区域基址下）。
+// 2026-11-04 实测：国内版该接口返回 200 + 5 个模型，与 global 响应同构
+// （contextWindow/maxTokens/reasoning/input/creditConsumptionLevel 齐全）。
+// 静态表只在实时拉取失败时兜底，避免上游目录接口抖动时整片空清单
+// 被宿主当成「该凭证没有模型」而淘汰。
 func FetchModels(ctx context.Context, baseURL string, token string, region Region) ([]Model, error) {
 	if strings.TrimSpace(token) == "" {
 		return nil, fmt.Errorf("access token is required to list models")
@@ -96,10 +104,16 @@ func FetchModels(ctx context.Context, baseURL string, token string, region Regio
 	if strings.TrimSpace(baseURL) == "" {
 		return nil, fmt.Errorf("upstream base URL is not configured")
 	}
-	if region.IsGlobal() {
-		return fetchModelConfig(ctx, baseURL, token)
+	models, errModels := fetchModelConfig(ctx, baseURL, token)
+	if errModels != nil {
+		if region.IsGlobal() {
+			return nil, errModels
+		}
+		// 国内版：实时失败回退静态快照（2026-09）。快照混进了 relay 通道/
+		// 已下架的模型，只应作为临时兜底，实时成功时以实时目录为准。
+		return staticCNModels(), nil
 	}
-	return staticCNModels(), nil
+	return models, nil
 }
 
 // fetchModelConfig 拉取国际版实时模型配置。
