@@ -1440,12 +1440,14 @@ func (v *adapter) ensureActivation(ctx context.Context, cred *Credential) string
 }
 
 // truncateText 截断过长的上游响应片段，避免把整页 HTML 塞进错误消息。
+//
+// 切点落在字符边界上：上游错误页多为中文，按字节切会劈出半个 UTF-8 序列。
 func truncateText(text string, limit int) string {
 	text = strings.TrimSpace(text)
 	if len(text) <= limit {
 		return text
 	}
-	return text[:limit] + "…"
+	return core.TrimToBytes(text, limit) + "…"
 }
 
 // ---- 营销投放 ----

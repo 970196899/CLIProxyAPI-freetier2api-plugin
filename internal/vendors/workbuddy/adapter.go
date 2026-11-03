@@ -450,7 +450,9 @@ func (v *adapter) SupportsCheckinFor(cred *core.Credential) bool {
 func (v *adapter) CheckinUnsupportedReason(cred *core.Credential) string {
 	native, errNative := v.Native(cred)
 	if errNative != nil {
-		return ""
+		// 凭证结构解析失败时不能报「支持签到」：面板会给出可点的按钮，点下去必然失败。
+		// 返回可读原因，把问题停在展示层。
+		return "凭证结构无法解析，无法判断签到资格"
 	}
 	return checkinUnsupportedReason(native)
 }

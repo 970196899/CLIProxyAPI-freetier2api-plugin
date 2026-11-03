@@ -63,7 +63,11 @@ func FetchBenefitModels(ctx context.Context, cred *Credential) ([]Model, error) 
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	body, errRead := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if errRead != nil {
+		// 半截 body 不能当完整响应交给解析层：网络问题会被误报成业务错误。
+		return nil, fmt.Errorf("read benefit models response: %w", errRead)
+	}
 	if resp.StatusCode >= 400 {
 		return nil, Classify(resp.StatusCode, string(body))
 	}

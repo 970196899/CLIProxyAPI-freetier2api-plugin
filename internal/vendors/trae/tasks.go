@@ -67,7 +67,13 @@ func Checkin(ctx context.Context, cred *Credential, cfg Config) (*CheckinResult,
 			return nil, fmt.Errorf("签到活动未开启")
 		}
 		if status.CheckedIn {
-			return &CheckinResult{Already: true, Credit: status.Credits, Message: "今日已完成签到"}, nil
+			// Credit 的语义是「本次所得」：Already 分支本次一分没进，写累计值会让
+			// 历史里的「本次获得」直接跳到累计数（其他渠道都是本次口径）。
+			message := "今日已完成签到"
+			if status.Credits > 0 {
+				message = fmt.Sprintf("今日已完成签到（累计 %d 积分）", status.Credits)
+			}
+			return &CheckinResult{Already: true, Credit: 0, Message: message}, nil
 		}
 	}
 
@@ -241,7 +247,11 @@ func postJSON(ctx context.Context, url string, headers map[string]string, payloa
 		return 0, nil, fmt.Errorf("trae request failed: %w", errDo)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	body, errRead := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if errRead != nil {
+		// 半截 body 不能当完整响应交给解析层：网络问题会被误报成业务错误。
+		return 0, nil, fmt.Errorf("trae read response: %w", errRead)
+	}
 	return resp.StatusCode, body, nil
 }
 

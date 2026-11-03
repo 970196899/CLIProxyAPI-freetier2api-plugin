@@ -465,10 +465,32 @@ func ClassifyStatus(status int) FailureKind {
 }
 
 // Truncate 截断过长的上游正文，避免错误信息淹没日志。
+//
+// 按 rune 截断而不是按字节：上游正文常是中文，按字节切会把最后一个字符
+// 劈成半个 UTF-8 序列，日志与面板里显示成 U+FFFD。limit 仍按字节口径理解
+// （调用方历来如此），只是切点会回退到字符边界。
 func Truncate(value string, limit int) string {
 	trimmed := strings.TrimSpace(value)
 	if limit <= 0 || len(trimmed) <= limit {
 		return trimmed
 	}
-	return trimmed[:limit] + "..."
+	return TrimToBytes(trimmed, limit) + "..."
+}
+
+// TrimToBytes 把字符串截到不超过 limit 字节，切点落在 UTF-8 字符边界上。
+//
+// 用于「按字节设上限、但不能切坏字符」的场合。limit <= 0 时返回空串。
+func TrimToBytes(value string, limit int) string {
+	if limit <= 0 {
+		return ""
+	}
+	if len(value) <= limit {
+		return value
+	}
+	cut := limit
+	// 回退到最近的字符起始字节：UTF-8 续字节形如 10xxxxxx。
+	for cut > 0 && value[cut]&0xC0 == 0x80 {
+		cut--
+	}
+	return value[:cut]
 }

@@ -227,7 +227,11 @@ func fetchTicketCredentials(ctx context.Context, ticketURL, ticketID, secret str
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	body, errRead := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if errRead != nil {
+		// 半截 body 不能当完整响应交给解析层：网络问题会被误报成业务错误。
+		return ticketPollResult{}, fmt.Errorf("read ticket poll response: %w", errRead)
+	}
 	if resp.StatusCode >= 400 {
 		note := describeUpstream(resp.StatusCode, body)
 		logger.Debug("codearts：票据未就绪 %s", note)
@@ -262,7 +266,8 @@ func describeUpstream(status int, body []byte) string {
 	}
 	trimmed := strings.TrimSpace(string(body))
 	if len(trimmed) > 160 {
-		trimmed = trimmed[:160] + "…"
+		// 按字符边界截断：上游错误正文常是中文。
+		trimmed = core.TrimToBytes(trimmed, 160) + "…"
 	}
 	if trimmed == "" {
 		return "HTTP " + strconv.Itoa(status)
@@ -458,7 +463,11 @@ func requestTokenCredentials(ctx context.Context, form url.Values, dpopJWK map[s
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	body, errRead := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if errRead != nil {
+		// 半截 body 不能当完整响应交给解析层：网络问题会被误报成业务错误。
+		return nil, fmt.Errorf("read token response: %w", errRead)
+	}
 	if resp.StatusCode >= 400 {
 		return nil, Classify(resp.StatusCode, string(body))
 	}

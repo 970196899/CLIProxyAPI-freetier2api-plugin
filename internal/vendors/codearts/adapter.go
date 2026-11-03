@@ -323,7 +323,12 @@ func (v *adapter) Checkin(ctx context.Context, cred *core.Credential) (*core.Che
 		key = sha256Hex([]byte(native.DomainID + "|" + native.UserID + "|" + native.AccessKeyID))
 	}
 	claimState, _ := v.benefitClaims.LoadOrStore(key, &benefitCheckinState{})
-	result, errClaim := checkin(ctx, native, claimState.(*benefitCheckinState))
+	state, okState := claimState.(*benefitCheckinState)
+	if !okState || state == nil {
+		// 同一张 map 只应存一种类型；兜底而不是直接断言，避免将来复用 map 时 panic。
+		state = &benefitCheckinState{}
+	}
+	result, errClaim := checkin(ctx, native, state)
 	if errClaim != nil {
 		return nil, core.ToPluginError(errClaim)
 	}
@@ -408,7 +413,8 @@ func (v *adapter) RunAllTasks(ctx context.Context, cred *core.Credential) []core
 		total += amount
 		label := activity.CampaignID
 		if len(label) > 8 {
-			label = label[:8]
+			// 活动 id 通常是 ASCII，但上游换过命名；按字符边界切不吃亏。
+			label = core.TrimToBytes(label, 8)
 		}
 		claimed = append(claimed, label+" +"+strconv.FormatInt(amount, 10))
 	}
