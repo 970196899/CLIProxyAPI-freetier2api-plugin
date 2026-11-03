@@ -235,7 +235,9 @@ func TestParseCallbackCode(t *testing.T) {
 		want bool
 	}{
 		{"official scheme", "office-raccoon://auth/callback?code=ac_1&state=s1", "ac_1", true},
-		{"loopback callback rejected (authorize-page flow only)", "http://127.0.0.1:17867/auth/callback?code=ac_2&state=s2", "", false},
+		{"loopback callback accepted", "http://127.0.0.1:17867/auth/callback?code=ac_2&state=s2", "ac_2", true},
+		{"loopback wrong path", "http://127.0.0.1:17867/callback?code=ac_3", "", false},
+		{"loopback public host rejected", "http://evil.com:17867/auth/callback?code=ac_4", "", false},
 		{"evil host", "office-raccoon://evil.com/callback?code=x", "", false},
 		{"wrong path", "http://127.0.0.1:1/other?code=x", "", false},
 		{"garbage", "not a url ::", "", false},
@@ -252,6 +254,9 @@ func TestParseCallbackCode(t *testing.T) {
 
 func TestAuthorizeURL(t *testing.T) {
 	got := AuthorizeURLWith("https://x.test", "办公小浣熊客户端", "st")
+	if !strings.Contains(got, "desktop_callback=loopback") || !strings.Contains(got, "redirect=http%3A%2F%2F127.0.0.1%3A37913%2Fauth%2Fcallback") {
+		t.Fatalf("authorize URL missing loopback params: %s", got)
+	}
 	if !strings.HasPrefix(got, "https://x.test/code/authorize?") || !strings.Contains(got, "state=st") {
 		t.Fatalf("AuthorizeURLWith = %q", got)
 	}

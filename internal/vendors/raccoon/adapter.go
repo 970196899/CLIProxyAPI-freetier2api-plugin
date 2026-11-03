@@ -300,6 +300,9 @@ func (v *adapter) LoginStart(ctx context.Context, _ map[string]any) (*pluginapi.
 	state := core.RandomHex(32)
 	sessionID := VendorID + "_" + state
 	StoreLoginSession(v.Env.Logins, sessionID, &PendingLogin{State: state})
+	// 起 loopback 回调监听：授权页确认后浏览器直接打 127.0.0.1:<port>/auth/callback，
+	// 登录当场完成，不必再粘链接。端口被占或已有监听时静默退回粘贴流程。
+	v.startLoginCatcher(state)
 	return &pluginapi.AuthLoginStartResponse{
 		Provider:  core.ProviderKey,
 		URL:       AuthorizeURLWith(v.resolveOrigin(), loginAppName, state),
@@ -330,7 +333,35 @@ func (v *adapter) LoginPoll(ctx context.Context, state string) (*pluginapi.AuthL
 
 // LocalCallbackHint 返回控制台要展示的回调形态（授权码换票兜底用）。
 func (v *adapter) LocalCallbackHint() string {
-	return "office-raccoon://auth/callback?code=…&state=…"
+	return CallbackURL() + "?code=…&state=…"
+}
+
+// startLoginCatcher 为本次登录挂上 loopback 回调监听。
+//
+// 授权页确认后会打 http://127.0.0.1:37913/auth/callback?code=…&state=…，
+// 命中即换票落盘。插件与浏览器不在同一台机器时回调打不到这里，用户从
+// 浏览器地址栏复制整条链接走 SubmitCallback，两条路共用 completeLogin。
+func (v *adapter) startLoginCatcher(state string) {
+	sessionID := VendorID + "_" + state
+	StartCallbackCatcher(state, func(code, callbackState string) (string, error) {
+		session, pollState := v.Env.Logins.Poll(sessionID)
+		if pollState == core.PollMissing {
+			return "", fmt.Errorf("登录会话不存在或已过期，请重新发起登录")
+		}
+		pending, okPending := session.Data.(*PendingLogin)
+		if !okPending {
+			return "", fmt.Errorf("登录会话数据已损坏，请重新发起登录")
+		}
+		if !CheckCallbackState(pending, callbackState) {
+			return "", fmt.Errorf("登录回调 state 校验失败，请重新发起登录")
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if _, errComplete := v.completeLogin(ctx, sessionID, code); errComplete != nil {
+			return "", errComplete
+		}
+		return "小浣熊登录成功", nil
+	})
 }
 
 // SubmitCallback 解析用户粘贴的回调链接（或裸授权码）并换票完成登录。
@@ -349,7 +380,7 @@ func (v *adapter) SubmitCallback(ctx context.Context, state, rawURL string) (*co
 	code, callbackState, okCode := ParseCallbackCode(rawURL)
 	if !okCode {
 		return nil, core.NewPluginError("callback_parse_failed",
-			"回调链接解析失败，请确认粘贴的是完整回调链接（office-raccoon://auth/callback?code=…）",
+			"回调链接解析失败，请确认粘贴的是完整回调链接（http://127.0.0.1:37913/auth/callback?code=…&state=…）",
 			http.StatusBadRequest)
 	}
 	if !CheckCallbackState(pending, callbackState) {
@@ -357,6 +388,11 @@ func (v *adapter) SubmitCallback(ctx context.Context, state, rawURL string) (*co
 			"登录回调 state 校验失败，请重新发起登录",
 			http.StatusBadRequest)
 	}
+	return v.completeLogin(ctx, strings.TrimSpace(state), code)
+}
+
+// completeLogin 用授权码换票并产出凭证（SubmitCallback 与 loopback 回调共用）。
+func (v *adapter) completeLogin(ctx context.Context, sessionID, code string) (*core.CallbackSubmitResult, error) {
 	access, refresh, expiresAt, uid, errExchange := ExchangeAuthorizationCode(ctx, v.resolveAuthBase(), code)
 	if errExchange != nil {
 		return nil, core.ToPluginError(errExchange)
@@ -379,7 +415,7 @@ func (v *adapter) SubmitCallback(ctx context.Context, state, rawURL string) (*co
 	if errStorage != nil {
 		return nil, core.NewPluginError("login_failed", "构建凭证失败："+errStorage.Error(), http.StatusInternalServerError)
 	}
-	v.Env.Logins.Delete(strings.TrimSpace(state))
+	v.Env.Logins.Delete(sessionID)
 	return &core.CallbackSubmitResult{
 		Status:  pluginapi.AuthLoginStatusSuccess,
 		Message: "小浣熊登录成功",
