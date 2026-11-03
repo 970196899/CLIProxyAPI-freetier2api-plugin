@@ -1370,8 +1370,12 @@ details > summary { cursor: pointer; color: var(--muted); font-size: 12.5px; }
         row.appendChild(barCell);
       }
 
-      // 刷新时间列（展示凭证文件的最后更新时间）
-      var rt = account.refreshed_at ? new Date(account.refreshed_at).toLocaleString() : "-";
+      // 刷新时间列（展示额度数据的最后取数时间；不是凭证续期时间）
+      // 凭证 refreshed_at 只在 token 快到期时才更新，拿它当「刷新时间」会让
+      // 没到期的账号显示几周前的旧时间，看起来像没同步。额度 fetched_at 才是
+      // 上面「剩余 / 总额」真正依据的数据新鲜度，一次查询额度后全表同批次。
+      var q = account.quota || {};
+      var rt = q.fetched_at ? new Date(q.fetched_at).toLocaleString() : "-";
       row.appendChild(el("td", rt, "muted"));
 
       table.appendChild(row);
@@ -1531,9 +1535,10 @@ details > summary { cursor: pointer; color: var(--muted); font-size: 12.5px; }
   function claimButtonSpec(account) {
     if (!account.supports_claim) return null;
     var claim = account.claim || {};
-    // error 只表示取数失败（上游挂了 / 鉴权失效），按钮要能点重试；
-    // note 是说明（如「额度 11-02 生效」），不改变按钮状态。
-    if (claim.error) return { text: "套餐领取", disabled: false, title: claim.error };
+    // error 只表示取数失败（上游挂了 / 鉴权失效 / 限流）：按钮保持可点作为
+    // 重试入口，但文案必须明确是「查询失败」，不能假装「套餐领取」可领——
+    // 那会让用户以为有套餐可领，点下去却是「上游限流」。
+    if (claim.error) return { text: "查询失败·重试", disabled: false, title: claim.error };
     // 未检测过（初次加载）或有待领套餐
     if (!claim.checked_at || claim.claimable > 0) {
       // 可领数量比说明更有用：说明只解释「为什么现在没有额度」，不该盖掉

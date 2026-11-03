@@ -3,6 +3,8 @@ package admin
 import (
 	"context"
 	"net/http"
+	"regexp"
+	"strings"
 	"time"
 
 	"freetier2api-plugin/cpasdk/pluginapi"
@@ -266,10 +268,45 @@ func (s *Service) runQuotaBatch(done chan struct{}, jobs []quotaJob) {
 	if len(claims) > 0 {
 		s.deps.MutateState(func(current *state.State) {
 			for uid, record := range claims {
+				// 瞬时限流/5xx 不该把「上次成功状态」顶掉：ZCode 领取状态检查
+				// 撞上上游 429 时，一次限流会把「已领取」改写成 error，按钮误
+				// 变成「套餐领取」，点下去又是限流——看起来像永远领不了。
+				// 只有可恢复错误才保留旧记录；确定类失败（鉴权、账号被封）
+				// 与真正取到结果都照常覆盖。
+				if record.ClaimStatus.Error != "" && isRetryableClaimError(record.ClaimStatus.Error) {
+					if prev, okPrev := current.Claim[uid]; okPrev && prev.ClaimStatus.Error == "" {
+						// 避免重复追加把 note 越滚越长。
+						const rateNote = "本次查询受限，显示上次结果"
+						if !strings.Contains(prev.Note, rateNote) {
+							prev.Note = strings.TrimSpace(prev.Note + "；" + rateNote)
+						}
+						prev.CheckedAt = record.CheckedAt
+						current.Claim[uid] = prev
+						continue
+					}
+				}
 				current.Claim[uid] = record
 			}
 		})
 	}
+}
+
+// retryableStatusRE 匹配错误文案里的 5xx 状态码（502/503/504…）与「5xx」写法。
+var retryableStatusRE = regexp.MustCompile(`\b5[0-9][0-9]\b|\b5xx\b`)
+
+// isRetryableClaimError 判断领取状态错误是否属于「过一会儿就好」的可恢复类。
+//
+// 领取状态只留字符串（pluginapi.ClaimStatus.Error），没有 Kind 可查，按供应商
+// 已格式化的文案匹配——与 zcode 的 classifyBillingOutcome 输出口径一致：
+// 429/软限流、5xx、超时都是可恢复；鉴权、账号被封、参数非法不是。
+func isRetryableClaimError(msg string) bool {
+	lower := strings.ToLower(msg)
+	return strings.Contains(lower, "[429]") ||
+		strings.Contains(lower, "soft_rate") ||
+		strings.Contains(lower, "限流") ||
+		strings.Contains(lower, "timeout") ||
+		strings.Contains(lower, "超时") ||
+		retryableStatusRE.MatchString(lower)
 }
 
 // keepLastQuota 把「本次刷新失败」折算成「上次成功读数 + 非实时标记」。
