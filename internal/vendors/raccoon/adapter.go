@@ -302,7 +302,6 @@ func (v *adapter) TaskSpecs() []core.TaskSpec {
 			Label:        "小浣熊每日积分",
 			Description:  "调用网页端 setting_info 触发服务器发放当日每日积分",
 			DefaultHours: []int{8},
-			Manual:       true,
 		},
 	}
 }
