@@ -102,6 +102,11 @@ func (s *Service) effectiveSchedule() map[string][]int {
 			schedule[core.TaskKindCheckin] = mergeHour(schedule[core.TaskKindCheckin], hour)
 		}
 	}
+	// 小浣熊「每日积分」按开关门控：关闭时从排程移除，不执行。
+	// kind 来自 core 常量（引擎层不能依赖供应商包）。
+	if !s.effectiveAutoRaccoonDailyGrant() {
+		delete(schedule, core.TaskKindRaccoonDailyGrant)
+	}
 	return schedule
 }
 
@@ -189,6 +194,16 @@ func (s *Service) effectiveAutoTasks() bool {
 	return s.deps.Config().AutoTasks
 }
 
+// effectiveAutoRaccoonDailyGrant 返回是否启用小浣熊「每日积分」任务
+// （页面设置优先于配置默认值）。
+func (s *Service) effectiveAutoRaccoonDailyGrant() bool {
+	state := s.deps.State()
+	if state.AutoRaccoonDailyGrant != nil {
+		return *state.AutoRaccoonDailyGrant
+	}
+	return s.deps.Config().AutoRaccoonDailyGrant
+}
+
 // effectiveAutoCheckin 返回是否启用自动签到（页面设置优先）。
 func (s *Service) effectiveAutoCheckin() bool {
 	state := s.deps.State()
@@ -201,11 +216,12 @@ func (s *Service) effectiveAutoCheckin() bool {
 // effectiveSettings 返回页面设置与配置合并后的可读视图。
 func (s *Service) effectiveSettings() map[string]any {
 	return map[string]any{
-		"auto_checkin":    s.effectiveAutoCheckin(),
-		"auto_checkin_at": s.checkinAt(),
-		"auto_tasks":      s.effectiveAutoTasks(),
-		"schedule":        s.effectiveSchedule(),
-		"task_specs":      s.catalog.Specs(),
+		"auto_checkin":             s.effectiveAutoCheckin(),
+		"auto_checkin_at":          s.checkinAt(),
+		"auto_tasks":               s.effectiveAutoTasks(),
+		"auto_raccoon_daily_grant": s.effectiveAutoRaccoonDailyGrant(),
+		"schedule":                 s.effectiveSchedule(),
+		"task_specs":               s.catalog.Specs(),
 	}
 }
 

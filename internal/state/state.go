@@ -110,6 +110,9 @@ type State struct {
 	AutoCheckin   *bool  `json:"auto_checkin,omitempty"`
 	AutoCheckinAt string `json:"auto_checkin_at,omitempty"`
 	AutoTasks     *bool  `json:"auto_tasks,omitempty"`
+	// AutoRaccoonDailyGrant 开启小浣熊「每日积分」任务（网页端 setting_info）。
+	// nil = 未设置，回落配置默认值。
+	AutoRaccoonDailyGrant *bool `json:"auto_raccoon_daily_grant,omitempty"`
 	// TaskSchedules 是按任务族保存的整点小时列表（0-23）。
 	// 新代码只读写这个字段；下面五个字段仅用于读取旧状态并迁移。
 	TaskSchedules map[string][]int `json:"task_schedules,omitempty"`

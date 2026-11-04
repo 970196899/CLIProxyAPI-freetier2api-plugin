@@ -445,8 +445,10 @@ func TestSettingsKeepsOnlyTwoToggles(t *testing.T) {
 	for _, marker := range []string{
 		`id="setAutoCheckin"`,
 		`id="setAutoTasks"`,
+		`id="setRaccoonDailyGrant"`,
 		"每日自动签到",
 		"签到后自动跑后续任务（开学季 / 连登奖励）",
+		"小浣熊每日积分",
 	} {
 		if !strings.Contains(page, marker) {
 			t.Fatalf("运行期设置缺少 %q", marker)

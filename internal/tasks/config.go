@@ -16,4 +16,6 @@ type Config struct {
 	AutoCheckinAt string
 	// AutoTasks 报告是否每日自动跑任务闭环。
 	AutoTasks bool
+	// AutoRaccoonDailyGrant 报告是否启用小浣熊「每日积分」任务。
+	AutoRaccoonDailyGrant bool
 }

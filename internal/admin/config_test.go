@@ -67,3 +67,21 @@ func TestDefaultStateDirHonoursEnv(t *testing.T) {
 		t.Fatalf("state dir = %q", got)
 	}
 }
+
+func TestDecodeRaccoonDailyGrant(t *testing.T) {
+	cfg, err := DecodePluginConfig([]byte("auto_raccoon_daily_grant: false\n"), DefaultPluginConfig())
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if cfg.AutoRaccoonDailyGrant {
+		t.Fatal("auto_raccoon_daily_grant should be false")
+	}
+	// 默认开启。
+	cfgDefault, errDefault := DecodePluginConfig([]byte(""), DefaultPluginConfig())
+	if errDefault != nil {
+		t.Fatalf("decode default: %v", errDefault)
+	}
+	if !cfgDefault.AutoRaccoonDailyGrant {
+		t.Fatal("auto_raccoon_daily_grant default should be true")
+	}
+}

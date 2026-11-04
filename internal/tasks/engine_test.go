@@ -3,6 +3,7 @@ package tasks
 import (
 	"context"
 	"testing"
+	"time"
 
 	"freetier2api-plugin/internal/core"
 )
@@ -104,5 +105,42 @@ func TestRunScheduledForAccountSkipsUndeclaredKind(t *testing.T) {
 	}
 	if len(vendor.calls) != 1 || vendor.calls[0] != "travel" {
 		t.Fatalf("调用记录 = %v, want [travel]", vendor.calls)
+	}
+}
+
+// TestEffectiveScheduleGatesRaccoonDailyGrant 锁住小浣熊每日积分按开关门控：
+// 开关关闭时从排程移除，开关开启（或未设置回落配置）时保留默认小时。
+func TestEffectiveScheduleGatesRaccoonDailyGrant(t *testing.T) {
+	registry := core.NewRegistry()
+	_ = registry.Register(&fakeScheduledVendor{
+		fakeCheckinVendor: fakeCheckinVendor{id: "raccoon"},
+		kinds:             []core.TaskSpec{{Kind: core.TaskKindRaccoonDailyGrant, DefaultHours: []int{8}}},
+	})
+	deps := newFakeDeps(time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC))
+	deps.registry = registry
+	// 与真实组合根一致：配置默认开启小浣熊每日积分。
+	deps.cfg.AutoRaccoonDailyGrant = true
+	service := &Service{deps: deps, catalog: NewCatalog(registry)}
+
+	// 默认（开关未设置）→ 配置默认开启 → 排程含该族。
+	on := service.effectiveSchedule()
+	if _, ok := on[core.TaskKindRaccoonDailyGrant]; !ok {
+		t.Fatalf("默认开启时排程应含 raccoon_daily_grant，得到 %v", on)
+	}
+
+	// 页面设置关闭 → 排程移除。
+	off := false
+	deps.state.AutoRaccoonDailyGrant = &off
+	offSchedule := service.effectiveSchedule()
+	if _, ok := offSchedule[core.TaskKindRaccoonDailyGrant]; ok {
+		t.Fatalf("开关关闭时排程应移除 raccoon_daily_grant，得到 %v", offSchedule)
+	}
+
+	// 页面设置开启 → 排程保留。
+	onFlag := true
+	deps.state.AutoRaccoonDailyGrant = &onFlag
+	onAgain := service.effectiveSchedule()
+	if _, ok := onAgain[core.TaskKindRaccoonDailyGrant]; !ok {
+		t.Fatalf("开关开启时排程应含 raccoon_daily_grant，得到 %v", onAgain)
 	}
 }

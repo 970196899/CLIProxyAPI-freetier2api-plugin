@@ -11,10 +11,11 @@ import (
 )
 
 type settingsUpdateRequest struct {
-	AutoCheckin   *bool            `json:"auto_checkin"`
-	AutoCheckinAt string           `json:"auto_checkin_at"`
-	AutoTasks     *bool            `json:"auto_tasks"`
-	TaskSchedules map[string][]int `json:"task_schedules"`
+	AutoCheckin           *bool            `json:"auto_checkin"`
+	AutoCheckinAt         string           `json:"auto_checkin_at"`
+	AutoTasks             *bool            `json:"auto_tasks"`
+	AutoRaccoonDailyGrant *bool            `json:"auto_raccoon_daily_grant"`
+	TaskSchedules         map[string][]int `json:"task_schedules"`
 
 	// Deprecated: 兼容旧版页面/脚本的固定字段。
 	CheckinHours   []int `json:"checkin_hours"`
@@ -51,6 +52,10 @@ func (s *Service) handleSettingsRequest(req pluginapi.ManagementRequest) plugina
 		if body.AutoTasks != nil {
 			current.AutoTasks = body.AutoTasks
 			changed["auto_tasks"] = *body.AutoTasks
+		}
+		if body.AutoRaccoonDailyGrant != nil {
+			current.AutoRaccoonDailyGrant = body.AutoRaccoonDailyGrant
+			changed["auto_raccoon_daily_grant"] = *body.AutoRaccoonDailyGrant
 		}
 		if current.TaskSchedules == nil {
 			current.TaskSchedules = map[string][]int{}

@@ -40,6 +40,8 @@ type PluginConfig struct {
 	AutoCheckinAt string
 	// AutoTasks 开启成长任务的每日自动闭环。
 	AutoTasks bool
+	// AutoRaccoonDailyGrant 开启小浣熊「每日积分」任务（网页端 setting_info）。
+	AutoRaccoonDailyGrant bool
 
 	// Raw 是配置的原始键值表（key → 原文），供供应商解析专属键。
 	Raw map[string]string
@@ -86,6 +88,8 @@ func DefaultPluginConfig() PluginConfig {
 		AutoCheckin:   true,
 		AutoCheckinAt: DefaultCheckinAt,
 		AutoTasks:     true,
+		// 小浣熊每日积分默认开启（网页端 setting_info 触发发放，幂等）。
+		AutoRaccoonDailyGrant: true,
 	}
 }
 
@@ -177,6 +181,8 @@ func applyConfigLine(cfg *PluginConfig, key, value string) error {
 		}
 	case "auto_tasks":
 		cfg.AutoTasks = ParseBool(value, cfg.AutoTasks)
+	case "auto_raccoon_daily_grant":
+		cfg.AutoRaccoonDailyGrant = ParseBool(value, cfg.AutoRaccoonDailyGrant)
 	}
 	return nil
 }

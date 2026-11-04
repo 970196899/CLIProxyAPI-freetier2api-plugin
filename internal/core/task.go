@@ -49,6 +49,11 @@ func SupportsScheduledKind(vendor Vendor, kind string) bool {
 const (
 	TaskKindCheckin   = "checkin"
 	TaskKindKeepalive = "keepalive"
+	// TaskKindRaccoonDailyGrant 是小浣熊「每日积分」任务族（网页端
+	// setting_info 触发服务器发放当日每日积分）。常量放 core 而不是
+	// 供应商包：任务引擎的排程门控（auto_raccoon_daily_grant）需要按
+	// kind 过滤，而引擎层不允许依赖供应商包。
+	TaskKindRaccoonDailyGrant = "raccoon_daily_grant"
 )
 
 // TaskItem 是一条待办任务（扫描结果）。

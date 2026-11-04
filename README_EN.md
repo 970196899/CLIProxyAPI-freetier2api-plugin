@@ -131,6 +131,7 @@ Configure under `plugins.configs.freetier` in `config.yaml` (runtime settings ca
 | `auto_checkin` | bool | `true` | Enable automated daily check-in |
 | `auto_checkin_at` | string | `10:00` | Daily check-in time (`HH:MM`, local time). Scheduling is hourly, so any minute above 0 rounds up to the next hour and the run never fires before the configured time |
 | `auto_tasks` | bool | `true` | Enable automated daily tasks |
+| `auto_raccoon_daily_grant` | bool | `true` | Enable the raccoon daily-points task: calls the web `setting_info` endpoint once a day to have the server grant that day's points (idempotent; runs at 08:00 by default) |
 | `codearts_credit_enabled` | bool | `false` | Explicitly enable credit-billed CodeArts inference; no automatic channel fallback. Refresh models after changing |
 | `disabled_models` | string / list | empty | Disabled models (`vendor:model` or bare name) |
 | `extra_models` | string | empty | Additional model IDs to register (comma-separated) |

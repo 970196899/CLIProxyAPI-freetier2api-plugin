@@ -291,6 +291,44 @@ func (v *adapter) CheckinUnsupportedReason(_ *core.Credential) string {
 	return "小浣熊没有每日签到；桌面端登录奖励为一次性领取"
 }
 
+// TaskSpecs 实现 core.TaskCatalogProvider：注册「每日积分」任务族。
+//
+// 每日积分由服务器在读取网页端 setting_info 时发放（source=daily），
+// 客户端没有其它可调用的签到端点，所以这是小浣熊唯一的每日任务。
+func (v *adapter) TaskSpecs() []core.TaskSpec {
+	return []core.TaskSpec{
+		{
+			Kind:         TaskKindDailyGrant,
+			Label:        "小浣熊每日积分",
+			Description:  "调用网页端 setting_info 触发服务器发放当日每日积分",
+			DefaultHours: []int{8},
+			Manual:       true,
+		},
+	}
+}
+
+// RunScheduled 实现 core.ScheduledRunner：执行「每日积分」任务族。
+func (v *adapter) RunScheduled(ctx context.Context, cred *core.Credential, kind string) (string, error) {
+	if kind != TaskKindDailyGrant {
+		return "", nil
+	}
+	native, errNative := v.Native(cred)
+	if errNative != nil {
+		return "", errNative
+	}
+	granted, credit, errGrant := DailyGrantViaSetting(ctx, v.resolveOrigin(), native)
+	if errGrant != nil {
+		return "", errGrant
+	}
+	if !granted {
+		return "今日每日积分已发放（无需重复操作）", nil
+	}
+	if credit > 0 {
+		return fmt.Sprintf("每日积分发放 +%d", credit), nil
+	}
+	return "每日积分已发放", nil
+}
+
 // ---- 登录与续期 ----
 
 // LoginStart 发起一次网页授权登录：生成一次性 state 并登记会话，

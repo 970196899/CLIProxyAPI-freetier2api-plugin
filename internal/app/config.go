@@ -140,9 +140,10 @@ func (a *App) ensureMachineSalt(cfg pluginConfig) (string, error) {
 // 管理接口包（仓库分层守卫禁止 tasks → admin）。
 func taskConfig(cfg admin.PluginConfig) tasks.Config {
 	return tasks.Config{
-		EnabledRealms: cfg.EnabledRealms,
-		AutoCheckin:   cfg.AutoCheckin,
-		AutoCheckinAt: cfg.AutoCheckinAt,
-		AutoTasks:     cfg.AutoTasks,
+		EnabledRealms:         cfg.EnabledRealms,
+		AutoCheckin:           cfg.AutoCheckin,
+		AutoCheckinAt:         cfg.AutoCheckinAt,
+		AutoTasks:             cfg.AutoTasks,
+		AutoRaccoonDailyGrant: cfg.AutoRaccoonDailyGrant,
 	}
 }

@@ -131,6 +131,7 @@ curl http://localhost:8317/v1/messages \
 | `auto_checkin` | bool | `true` | 每日自动签到开关 |
 | `auto_checkin_at` | string | `10:00` | 每日自动签到时间（`HH:MM`，本地时区）。排程粒度为整点，分钟不为 0 时顺延到下一整点，保证不会早于设定时刻执行 |
 | `auto_tasks` | bool | `true` | 每日自动任务开关 |
+| `auto_raccoon_daily_grant` | bool | `true` | 小浣熊「每日积分」任务开关：每日调用网页端 `setting_info` 触发服务器发放当日每日积分（幂等，已发不重复；默认 08:00 执行） |
 | `codearts_credit_enabled` | bool | `false` | 明确开启 CodeArts 积分推理（消耗账号积分）；默认福利通道，失败不自动切换。修改后刷新模型目录 |
 | `disabled_models` | string / list | 空 | 禁用模型列表（支持 `vendor:model` 或裸名，与控制台勾选合并） |
 | `extra_models` | string | 空 | 额外补充注册的模型名（逗号分隔） |

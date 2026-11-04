@@ -466,6 +466,9 @@ details > summary { cursor: pointer; color: var(--muted); font-size: 12.5px; }
       <div class="row" style="margin-top:8px">
         <label title="开关只影响签到后自动执行的后续任务：开学季、连登奖励。其它成长任务不随签到自动跑。"><input type="checkbox" id="setAutoTasks"> 签到后自动跑后续任务（开学季 / 连登奖励）</label>
       </div>
+      <div class="row" style="margin-top:8px">
+        <label title="调用网页端 setting_info 触发服务器发放当日每日积分（幂等，已发不重复）。"><input type="checkbox" id="setRaccoonDailyGrant"> 小浣熊每日积分</label>
+      </div>
       <div class="row" style="margin-top:12px">
         <button class="act primary" id="btnSaveSettings">保存设置</button>
       </div>
@@ -1404,6 +1407,7 @@ details > summary { cursor: pointer; color: var(--muted); font-size: 12.5px; }
       var settings = status.settings || {};
       document.getElementById("setAutoCheckin").checked = !!settings.auto_checkin;
       document.getElementById("setAutoTasks").checked = !!settings.auto_tasks;
+      document.getElementById("setRaccoonDailyGrant").checked = !!settings.auto_raccoon_daily_grant;
       var scheduler = status.scheduler || {};
       var labels = {};
       (settings.task_specs || []).forEach(function (spec) { labels[spec.kind] = spec.label || spec.kind; });
@@ -3062,11 +3066,12 @@ details > summary { cursor: pointer; color: var(--muted); font-size: 12.5px; }
     runAutoAll(selectedAccountIDs(), this);
   });
   document.getElementById("btnSaveSettings").addEventListener("click", function () {
-    // 只提交两个开关：签到时间与各任务执行时刻都沿用已存值，后端对缺省
+    // 只提交三个开关：签到时间与各任务执行时刻都沿用已存值，后端对缺省
     // 字段不做改动，因此不会把用户已有配置清空。
     var payload = {
       auto_checkin: document.getElementById("setAutoCheckin").checked,
-      auto_tasks: document.getElementById("setAutoTasks").checked
+      auto_tasks: document.getElementById("setAutoTasks").checked,
+      auto_raccoon_daily_grant: document.getElementById("setRaccoonDailyGrant").checked
     };
     api("POST", "/settings", payload).then(function (data) {
       banner("ok", "设置已保存并生效");

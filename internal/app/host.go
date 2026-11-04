@@ -29,13 +29,14 @@ func (h *hostBridge) AuthJSON(ctx context.Context, authIndex string) ([]byte, bo
 func (h *hostBridge) Settings() core.Settings {
 	cfg := h.app.Config()
 	return core.Settings{
-		EnabledRealms: append([]string(nil), cfg.EnabledRealms...),
-		StateDir:      cfg.StateDir,
-		MachineSalt:   h.app.machineSalt,
-		AutoCheckin:   cfg.AutoCheckin,
-		AutoCheckinAt: cfg.AutoCheckinAt,
-		AutoTasks:     cfg.AutoTasks,
-		LogLevel:      cfg.LogLevel,
+		EnabledRealms:         append([]string(nil), cfg.EnabledRealms...),
+		StateDir:              cfg.StateDir,
+		MachineSalt:           h.app.machineSalt,
+		AutoCheckin:           cfg.AutoCheckin,
+		AutoCheckinAt:         cfg.AutoCheckinAt,
+		AutoTasks:             cfg.AutoTasks,
+		AutoRaccoonDailyGrant: cfg.AutoRaccoonDailyGrant,
+		LogLevel:              cfg.LogLevel,
 	}
 }
 
