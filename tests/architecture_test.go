@@ -351,6 +351,7 @@ var vendorRequiredFiles = []string{
 
 var vendorOptionalFiles = []string{
 	"tasks.go",
+	"clientid.go",
 }
 
 var vendorDirNamePattern = regexp.MustCompile(`^[a-z][a-z0-9]*$`)

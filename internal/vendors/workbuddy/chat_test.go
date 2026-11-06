@@ -431,3 +431,70 @@ func TestApplyCatalogFallbacksFillsWindow(t *testing.T) {
 		t.Fatalf("unknown model should get the default window, got %d", filled[0].ContextWindow)
 	}
 }
+
+// TestNormalizeIdentitySentence 锁住三方客户端身份句的品牌替换：
+// 非官方客户端（deepseek-harness / Claude Code 等）的身份句品牌被替换为
+// WorkBuddy，普通内容不受影响，且幂等。
+func TestNormalizeIdentitySentence(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string // "" 表示应原样返回
+	}{
+		{
+			name: "deepseek-harness 身份句",
+			in:   "You are an AI agent powered by DeepSeek Harness.\n\nYou are a coding agent.",
+			want: "You are an AI agent powered by WorkBuddy.\n\nYou are a coding agent.",
+		},
+		{
+			name: "claude 身份句",
+			in:   "You are Claude, an AI assistant.",
+			want: "You are WorkBuddy, an AI assistant.",
+		},
+		{
+			name: "codex 身份句",
+			in:   "You are Codex, an AI assistant.",
+			want: "You are WorkBuddy, an AI assistant.",
+		},
+		{
+			name: "普通 system 内容不受影响",
+			in:   "You are helpful.\n\nFollow the instructions.",
+			want: "",
+		},
+		{
+			name: "幂等：已替换为 WorkBuddy 不重复处理",
+			in:   "You are an AI agent powered by WorkBuddy.",
+			want: "",
+		},
+		{
+			name: "品牌不在身份句式开头不处理",
+			in:   "请把这段 deepseek 代码解释一下。",
+			want: "",
+		},
+	}
+	for _, tc := range cases {
+		got := normalizeIdentitySentence(tc.in)
+		if tc.want == "" {
+			if got != tc.in {
+				t.Errorf("%s: got %q, want 原样 %q", tc.name, got, tc.in)
+			}
+		} else if got != tc.want {
+			t.Errorf("%s: got %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestPrepareBodyNormalizesIdentity 锁住 PrepareBody 管道对身份句的品牌
+// 替换在消息数组里真正生效（端到端）。
+func TestPrepareBodyNormalizesIdentity(t *testing.T) {
+	body := `{"model":"hy4free","stream":true,"messages":[{"role":"system","content":"You are an AI agent powered by DeepSeek Harness.\n\nBe helpful."},{"role":"user","content":"hi"}]}`
+	out := PrepareBody([]byte(body), PrepareOptions{Model: "hy4free"})
+	// 序列化后品牌已被替换。
+	if !strings.Contains(string(out), "WorkBuddy") {
+		t.Fatalf("PrepareBody 未替换身份句品牌: %s", string(out))
+	}
+	// 语义不丢：用户消息仍在。
+	if !strings.Contains(string(out), "\"hi\"") {
+		t.Fatalf("用户消息丢失: %s", string(out))
+	}
+}

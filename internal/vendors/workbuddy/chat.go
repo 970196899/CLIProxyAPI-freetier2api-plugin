@@ -1568,6 +1568,8 @@ func PrepareBody(body []byte, opts PrepareOptions) []byte {
 		messages = repackToolResultBlocks(messages)
 		// 8) 孤儿 tool_call 裁剪。
 		messages = cleanupOrphanToolCalls(messages)
+		// 8.5) 三方客户端身份句归一（非官方品牌 → WorkBuddy，防上游 11128 渠道校验）。
+		messages = normalizeIdentitySentences(messages)
 		payload["messages"] = messages
 	}
 
