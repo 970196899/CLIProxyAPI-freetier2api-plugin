@@ -432,9 +432,10 @@ func TestApplyCatalogFallbacksFillsWindow(t *testing.T) {
 	}
 }
 
-// TestNormalizeIdentitySentence 锁住三方客户端身份句的品牌替换：
-// 非官方客户端（deepseek-harness / Claude Code 等）的身份句品牌被替换为
-// WorkBuddy，普通内容不受影响，且幂等。
+// TestNormalizeIdentitySentence 锁住三方客户端身份句/签名的归一：
+// 非官方客户端（deepseek-harness 等）的品牌被替换为 WorkBuddy，
+// 工作区约定（workspace root）被替换为 workspace，普通内容不受影响，
+// 且幂等。
 func TestNormalizeIdentitySentence(t *testing.T) {
 	cases := []struct {
 		name string
@@ -445,6 +446,16 @@ func TestNormalizeIdentitySentence(t *testing.T) {
 			name: "deepseek-harness 身份句",
 			in:   "You are an AI agent powered by DeepSeek Harness.\n\nYou are a coding agent.",
 			want: "You are an AI agent powered by WorkBuddy.\n\nYou are a coding agent.",
+		},
+		{
+			name: "deepseek-harness 工作区约定",
+			in:   "You are an AI agent powered by DeepSeek Harness.\n\nTokens prefixed with @ are paths. Relative paths resolve from the workspace root.",
+			want: "You are an AI agent powered by WorkBuddy.\n\nTokens prefixed with @ are paths. Relative paths resolve from the workspace.",
+		},
+		{
+			name: "工作区约定无品牌也归一",
+			in:   "Tokens prefixed with @ are paths. Relative paths resolve from the workspace root.",
+			want: "Tokens prefixed with @ are paths. Relative paths resolve from the workspace.",
 		},
 		{
 			name: "claude 身份句",
