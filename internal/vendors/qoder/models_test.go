@@ -218,3 +218,84 @@ func TestModelCreditsFromPriceFactor(t *testing.T) {
 
 // float64Ptr 便于在测试里构造「上游显式给了倍率」的模型。
 func float64Ptr(value float64) *float64 { return &value }
+
+// TestParseModelsMergesAllCategories 钉住 2026-11-08 的修复：
+// 上游 model/list 把模型分散在多个分类，QoDuck（key=lmodel）只出现在 app 分类且
+// enable=true。parseModels 必须：主流分类（assistant/developer/chat）全量保留，
+// 其他分类只补 enable=true 的模型，且按 key 去重。enable=false 的场景专属 key
+// （quest-auto）不应被引入。
+func TestParseModelsMergesAllCategories(t *testing.T) {
+	resp := map[string]interface{}{
+		"assistant": []interface{}{
+			map[string]interface{}{"key": "gmodel", "display_name": "GLM-5.3", "enable": true},
+			map[string]interface{}{"key": "dmodel", "display_name": "DeepSeek-V4-Pro", "enable": true},
+		},
+		"chat": []interface{}{
+			map[string]interface{}{"key": "gmodel", "display_name": "GLM-5.3", "enable": true},
+			map[string]interface{}{"key": "dmodel", "display_name": "DeepSeek-V4-Pro", "enable": true},
+			map[string]interface{}{"key": "mmodel", "display_name": "MiniMax-M3.1-Flash", "enable": true},
+		},
+		"app": []interface{}{
+			// QoDuck 只在 app 分类出现，enable=true（实测）。
+			map[string]interface{}{"key": "lmodel", "display_name": "QoDuck", "enable": true, "price_factor": 0.0},
+			map[string]interface{}{"key": "gmodel", "display_name": "GLM-5.3", "enable": true},
+		},
+		"developer": []interface{}{
+			map[string]interface{}{"key": "gmodel", "display_name": "GLM-5.3", "enable": true},
+		},
+		"qwake": []interface{}{
+			map[string]interface{}{"key": "dmodel", "display_name": "DeepSeek-V4-Pro", "enable": true},
+		},
+		"quest": []interface{}{
+			// 场景专属 key，enable=false：不应被引入（目录保持干净）。
+			map[string]interface{}{"key": "quest-auto", "display_name": "Auto", "enable": false, "price_factor": 0.5},
+		},
+	}
+
+	models := parseModels(resp)
+	if len(models) != 4 {
+		t.Fatalf("parseModels 合并后 = %d 个模型（gmodel/dmodel/mmodel/lmodel）; want 4", len(models))
+	}
+
+	byKey := make(map[string]Model, len(models))
+	for _, m := range models {
+		byKey[m.Key] = m
+	}
+
+	qoduck, ok := byKey["lmodel"]
+	if !ok {
+		t.Fatal("QoDuck (lmodel) 必须从 app 分类合并进来")
+	}
+	if qoduck.DisplayName != "QoDuck" || !qoduck.Enable {
+		t.Errorf("QoDuck = %+v; want DisplayName=QoDuck, Enable=true", qoduck)
+	}
+	if qoduck.PriceFactor == nil || *qoduck.PriceFactor != 0 {
+		t.Errorf("QoDuck price_factor = %v; want 0（限免）", qoduck.PriceFactor)
+	}
+
+	// 同一 key 在多个分类出现，只保留一份。
+	for _, want := range []string{"gmodel", "dmodel", "mmodel"} {
+		if _, ok := byKey[want]; !ok {
+			t.Errorf("模型 %s 必须保留（去重后）", want)
+		}
+	}
+	// enable=false 的场景专属 key 不引入。
+	if _, ok := byKey["quest-auto"]; ok {
+		t.Error("enable=false 的场景专属 key（quest-auto）不得被引入")
+	}
+}
+
+// TestParseModelsSkipsEmptyAndBlankKey 空分类与空 key 不产出模型。
+func TestParseModelsSkipsEmptyAndBlankKey(t *testing.T) {
+	resp := map[string]interface{}{
+		"assistant": []interface{}{
+			map[string]interface{}{"key": "  ", "display_name": "Blank"},
+			map[string]interface{}{"display_name": "NoKey"},
+		},
+		"chat": []interface{}{},
+	}
+	models := parseModels(resp)
+	if len(models) != 0 {
+		t.Fatalf("空/空 key 模型必须跳过; got %d", len(models))
+	}
+}

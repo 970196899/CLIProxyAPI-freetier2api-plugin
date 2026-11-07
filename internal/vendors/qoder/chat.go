@@ -1591,75 +1591,109 @@ func (b *Bridge) ListAvailableModels(ctx context.Context) ([]Model, error) {
 }
 
 func parseModels(resp map[string]interface{}) []Model {
-	// 按优先级尝试多个分类
-	categories := []string{"assistant", "developer", "chat"}
-	for _, cat := range categories {
-		rawList, _ := resp[cat].([]interface{})
-		out := extractModels(rawList)
-		if len(out) > 0 {
-			return out
-		}
-	}
-	return nil
-}
+	// 上游 model/list 把模型按产品线/场景分散在多个分类里
+	// （assistant/developer/chat/app/qwork/qwake/inline/quest/experts/nap/byok_*），
+	// 每个分类是同一批模型的一个投影。
+	//
+	// 主流分类（assistant/developer/chat）是历史目录来源，全量保留（含 enable=false，
+	// 与现状语义一致——实测这些模型的 enable 多为 false 但一直在目录里且可用）。
+	//
+	// 其他分类是产品线投影，只把其中 enable=true 的模型补进来：
+	// 实测（2026-11-08）QoDuck（key=lmodel）只在 app 分类出现且 enable=true、
+	// price_factor=0（限免），不补就永远漏掉，表现为「上游有、/v1/models 拉不到」。
+	// 而 enable=false 的场景专属 key（quest-auto、nap-auto、qwork-ultimate 等）
+	// 不引入——它们不在主流目录里，且多半依赖特定场景，塞进目录只会让客户端
+	// 看到一批未必可调用的模型。
+	//
+	// 去重按 key，主流优先：同名 key 稳定取主流投影（实测各分类同名 key 的
+	// price_factor 一致，取哪份都一样）。
+	mainCats := []string{"assistant", "developer", "chat"}
+	extraCats := []string{"app", "qwork", "qwake", "inline", "quest", "experts",
+		"nap", "byok_enterprise", "byok_teams"}
 
-func extractModels(rawList []interface{}) []Model {
-	out := make([]Model, 0, len(rawList))
-	for _, it := range rawList {
-		m, ok := it.(map[string]interface{})
-		if !ok {
-			continue
-		}
-		enable, _ := m["enable"].(bool)
-		model := Model{
-			Key:            StrVal(m, "key"),
-			DisplayName:    StrVal(m, "display_name"),
-			Enable:         enable,
-			IsDefault:      func() bool { v, _ := m["is_default"].(bool); return v }(),
-			IsReasoning:    func() bool { v, _ := m["is_reasoning"].(bool); return v }(),
-			MaxInputTokens: int(FloatVal(m, "max_input_tokens")),
-			PriceFactor:    FloatPtr(m, "price_factor"),
-		}
-		if cc, ok := m["context_config"].(map[string]interface{}); ok {
-			var defaultCfg map[string]interface{}
-			for _, cfg := range cc {
-				cfgMap, _ := cfg.(map[string]interface{})
-				if cfgMap == nil {
+	seen := make(map[string]bool)
+	out := make([]Model, 0, 16)
+	appendCat := func(rawList []interface{}, onlyEnabled bool) {
+		for _, it := range rawList {
+			m, ok := it.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			key := strings.TrimSpace(StrVal(m, "key"))
+			if key == "" || seen[key] {
+				continue
+			}
+			if onlyEnabled {
+				if enable, _ := m["enable"].(bool); !enable {
 					continue
 				}
-				isDefault, _ := cfgMap["is_default"].(bool)
-				if isDefault {
+			}
+			seen[key] = true
+			out = append(out, modelFromMap(m))
+		}
+	}
+	for _, cat := range mainCats {
+		if rawList, ok := resp[cat].([]interface{}); ok {
+			appendCat(rawList, false)
+		}
+	}
+	for _, cat := range extraCats {
+		if rawList, ok := resp[cat].([]interface{}); ok {
+			appendCat(rawList, true)
+		}
+	}
+	return out
+}
+
+func modelFromMap(m map[string]interface{}) Model {
+	enable, _ := m["enable"].(bool)
+	model := Model{
+		Key:            StrVal(m, "key"),
+		DisplayName:    StrVal(m, "display_name"),
+		Enable:         enable,
+		IsDefault:      func() bool { v, _ := m["is_default"].(bool); return v }(),
+		IsReasoning:    func() bool { v, _ := m["is_reasoning"].(bool); return v }(),
+		MaxInputTokens: int(FloatVal(m, "max_input_tokens")),
+		PriceFactor:    FloatPtr(m, "price_factor"),
+	}
+	if cc, ok := m["context_config"].(map[string]interface{}); ok {
+		var defaultCfg map[string]interface{}
+		for _, cfg := range cc {
+			cfgMap, _ := cfg.(map[string]interface{})
+			if cfgMap == nil {
+				continue
+			}
+			isDefault, _ := cfgMap["is_default"].(bool)
+			if isDefault {
+				defaultCfg = cfgMap
+				break
+			}
+		}
+		if defaultCfg == nil {
+			for _, cfg := range cc {
+				cfgMap, _ := cfg.(map[string]interface{})
+				if cfgMap != nil {
 					defaultCfg = cfgMap
 					break
 				}
 			}
-			if defaultCfg == nil {
-				for _, cfg := range cc {
-					cfgMap, _ := cfg.(map[string]interface{})
-					if cfgMap != nil {
-						defaultCfg = cfgMap
-						break
-					}
-				}
-			}
-			if defaultCfg != nil {
-				model.ContextWindow = int(FloatVal(defaultCfg, "token_count"))
-			}
 		}
-		if model.ContextWindow == 0 {
-			model.ContextWindow = model.MaxInputTokens
+		if defaultCfg != nil {
+			model.ContextWindow = int(FloatVal(defaultCfg, "token_count"))
 		}
-		if model.ContextWindow == 0 {
-			model.ContextWindow = model.MaxInputTokens
-		}
-		if model.IsReasoning {
-			model.MaxOutputTokens = 32768
-		} else {
-			model.MaxOutputTokens = 16384
-		}
-		out = append(out, model)
 	}
-	return out
+	if model.ContextWindow == 0 {
+		model.ContextWindow = model.MaxInputTokens
+	}
+	if model.ContextWindow == 0 {
+		model.ContextWindow = model.MaxInputTokens
+	}
+	if model.IsReasoning {
+		model.MaxOutputTokens = 32768
+	} else {
+		model.MaxOutputTokens = 16384
+	}
+	return model
 }
 
 // DeepCopyMap does a JSON round-trip deep copy.
