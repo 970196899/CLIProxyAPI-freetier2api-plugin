@@ -20,6 +20,7 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"freetier2api-plugin/internal/core"
 	"freetier2api-plugin/internal/hostbridge"
@@ -451,6 +452,12 @@ func ChatStream(ctx context.Context, baseURL string, req ChatRequest, onChunk St
 		if data == "[DONE]" {
 			return nil
 		}
+		// 上游流若在 UTF-8 字符中间被截断（连接中断/网络重传损坏），
+		// json.Unmarshal 会把坏字节替换成 U+FFFD（�），客户端看到乱码。
+		// 宁可丢弃这一行增量，也不输出 �。
+		if !utf8.ValidString(data) {
+			continue
+		}
 
 		var payload map[string]any
 		if err := json.Unmarshal([]byte(data), &payload); err != nil {
@@ -459,14 +466,22 @@ func ChatStream(ctx context.Context, baseURL string, req ChatRequest, onChunk St
 
 		switch currentEvent {
 		case "output":
-			delta := map[string]any{}
 			resp, _ := payload["response"].(string)
 			reasoning, _ := payload["reasoning_content"].(string)
-			if resp != "" {
-				delta["content"] = resp
-			}
+			// Trae 上游对推理模型（deepseek-v4.1-flash 等）把正文也放进
+			// reasoning_content，只有尾部一小段进 response；只认 content 的
+			// 客户端（如 DSH）在字段分离时正文被埋、字段切换渲染错乱。
+			// 统一并入 content，保持上游顺序（思考在前、正文在后）。
+			delta := map[string]any{}
+			var content string
 			if reasoning != "" {
-				delta["reasoning_content"] = reasoning
+				content += reasoning
+			}
+			if resp != "" {
+				content += resp
+			}
+			if content != "" {
+				delta["content"] = content
 			}
 			if len(delta) > 0 {
 				if errEmit := emit(delta, nil); errEmit != nil {
