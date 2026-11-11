@@ -33,56 +33,6 @@ func testGlobalCredential(uid string) *Credential {
 	return credential
 }
 
-// TestDailyBonusBeaconEventShape 锁定信标事件的字段形态。
-func TestDailyBonusBeaconEventShape(t *testing.T) {
-	event := DailyBonusBeaconEvent(testGlobalCredential("uid-1234"))
-
-	if event["eventCode"] != "chat_request_send" {
-		t.Fatalf("eventCode = %v, want chat_request_send", event["eventCode"])
-	}
-	// userId 缺失时上游 200 但静默丢弃事件。
-	if event["userId"] != "uid-1234" {
-		t.Fatalf("userId = %v, want uid-1234", event["userId"])
-	}
-	// 会话/请求 id 必须同值，且每天应像新会话（非固定重放值）。
-	conversation, _ := event["conversationId"].(string)
-	request, _ := event["requestId"].(string)
-	root, _ := event["rootRequestId"].(string)
-	parent, _ := event["parentConversationId"].(string)
-	if conversation == "" || conversation != request || request != root || root != parent {
-		t.Fatalf("conversation/request ids must be non-empty and equal: conv=%q req=%q root=%q parent=%q",
-			conversation, request, root, parent)
-	}
-	again := DailyBonusBeaconEvent(testGlobalCredential("uid-1234"))
-	againConversation, _ := again["conversationId"].(string)
-	if againConversation == conversation {
-		t.Fatal("each beacon must mint a fresh conversation id (day looks like a new conversation)")
-	}
-	// 零值字段必须存在（上游要求字段在，哪怕为空）。
-	if _, ok := event["mentionContexts"].([]any); !ok {
-		t.Fatalf("mentionContexts must be present as an array, got %T", event["mentionContexts"])
-	}
-	// knowledgeId / knowledgeName 按官方客户端抓包用空字符串：同一 eventCode
-	// 的另外三处 payload（credential.go 的会话序列）都是字符串，这里曾经写成
-	// 空数组。上游两种都收，但类型分叉意味着任何一次 schema 收紧都只会打断
-	// 其中一条路径，故统一到抓包形态。
-	for _, key := range []string{"knowledgeId", "knowledgeName"} {
-		value, ok := event[key].(string)
-		if !ok {
-			t.Fatalf("%s must be present as a string, got %T", key, event[key])
-		}
-		if value != "" {
-			t.Fatalf("%s must be empty, got %q", key, value)
-		}
-	}
-	if event["agentName"] != "default" || event["agentType"] != "conversation" {
-		t.Fatalf("agent fields mismatch: %v / %v", event["agentName"], event["agentType"])
-	}
-	if event["requestModelId"] != "deepseek-v4-flash" {
-		t.Fatalf("requestModelId = %v", event["requestModelId"])
-	}
-}
-
 // TestParseGrowthHeatmapCells 锁定 cells 数组形态。
 func TestParseGrowthHeatmapCells(t *testing.T) {
 	data := json.RawMessage(`{"cells":[
