@@ -167,7 +167,14 @@ func (d adminDeps) RefreshModels(ctx context.Context) (int, error) {
 	return d.app.refreshModelsFromUpstream(ctx)
 }
 
-func (d adminDeps) Reconfigure() error { return d.app.ApplyConfig(d.app.Config()) }
+func (d adminDeps) Reconfigure() error {
+	// 与 main.go 的 register/reconfigure RPC 路径对齐：ApplyConfig 会写
+	// machineSalt 与 Catalog，必须持 lifecycleMu，否则与并发的执行器/额度
+	// 请求（读 machineSalt）构成数据竞争。
+	d.app.lifecycleMu.Lock()
+	defer d.app.lifecycleMu.Unlock()
+	return d.app.ApplyConfig(d.app.Config())
+}
 
 // SubmitLoginCallback 把页面粘回来的 localhost 回调链接交给对应供应商处理。
 func (d adminDeps) SendLoginSMS(ctx context.Context, vendorID, phone string) (string, error) {

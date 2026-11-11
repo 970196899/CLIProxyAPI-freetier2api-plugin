@@ -9,7 +9,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/netip"
+	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
@@ -17,6 +20,7 @@ import (
 
 	"freetier2api-plugin/internal/core"
 	"freetier2api-plugin/internal/hostbridge"
+	"freetier2api-plugin/internal/logger"
 
 	"unicode/utf8"
 )
@@ -1062,7 +1066,7 @@ func createSession(ctx context.Context, cred *Credential, baseURLOverride string
 	sessionID := findDeepString(raw, "session_id", "sessionId", "id", "sessionID")
 	if sessionID == "" {
 		rawBytes, _ := json.Marshal(raw)
-		return "", fmt.Errorf("no session_id in response: %s", string(rawBytes))
+		return "", fmt.Errorf("no session_id in response: %s", core.TrimToBytes(string(rawBytes), 256))
 	}
 
 	return sessionID, nil
@@ -1226,14 +1230,47 @@ func AccountHostFor(r Region) string {
 }
 
 // AgentHostFor 返回 Agent 业务基础地址（配置可覆盖）。
+//
+// override（来自凭证 base_url 或 config）在采用前必须过 isSafeUpstreamHost：
+// 否则一个可控 base_url 会把带账号 token 的请求引向内网/环回（带凭证 SSRF）。
 func AgentHostFor(r Region, override string) string {
 	if trimmed := strings.TrimRight(strings.TrimSpace(override), "/"); trimmed != "" {
-		return trimmed
+		if isSafeUpstreamHost(trimmed) {
+			return trimmed
+		}
+		logger.Info("minimaxcode：拒绝不安全的 base_url override，回落默认域：%q", trimmed)
 	}
 	if r == RegionCN {
 		return AgentHostCN
 	}
 	return AgentHostGlobal
+}
+
+// isSafeUpstreamHost 校验 override 是否可安全作为出站目标：仅 https，
+// 且主机不是环回/私网/链路本地/未指定地址（防带凭证 SSRF 打内网）。
+func isSafeUpstreamHost(raw string) bool {
+	u, errParse := url.Parse(raw)
+	if errParse != nil || u.Host == "" {
+		return false
+	}
+	if u.Scheme != "https" {
+		return false
+	}
+	host := u.Hostname()
+	if host == "" {
+		return false
+	}
+	if addr, errAddr := netip.ParseAddr(host); errAddr == nil {
+		return !(addr.IsLoopback() || addr.IsPrivate() || addr.IsLinkLocalUnicast() || addr.IsLinkLocalMulticast() || addr.IsUnspecified())
+	}
+	if ip, errLookup := net.LookupIP(host); errLookup == nil {
+		for _, a := range ip {
+			if a.IsLoopback() || a.IsPrivate() || a.IsLinkLocalUnicast() || a.IsLinkLocalMulticast() || a.IsUnspecified() {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // PlatformHostFor 返回该区域的开放平台域（Token Plan 窗口查询用）。

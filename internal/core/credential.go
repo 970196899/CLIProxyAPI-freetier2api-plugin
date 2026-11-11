@@ -199,6 +199,20 @@ func (c *Credential) ApplyTokenRefresh(token, refreshToken string, expiresAt int
 	return changed
 }
 
+// setNative 在并发安全的前提下写入供应商原生凭证对象。
+//
+// Native 与 Token/RefreshToken 同属一份会被并发刷新/读取的凭证状态，
+// 必须走同一把 c.mu——否则刷新路径的写与出站请求构造路径（spec.Extract）
+// 的读构成数据竞争，interface{} 撕裂读会让供应商拿到半初始化对象。
+func (c *Credential) setNative(native any) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.Native = native
+}
+
 // CachedModel 是缓存的单条上游模型元数据。
 //
 // 定义在 core 而不是 state：供应商与模型目录（admin.Catalog）都使用它，
@@ -353,7 +367,7 @@ func (a *NativeAdapter[T]) Refresh(ctx context.Context, cred *Credential) (*Cred
 	}
 	if result.Changed {
 		cred.ApplyTokenRefresh(result.Token, result.RefreshToken, result.ExpiresAt)
-		cred.Native = result.Native
+		cred.setNative(result.Native)
 	}
 	return cred, result.Changed, nil
 }

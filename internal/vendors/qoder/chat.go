@@ -1048,7 +1048,7 @@ func ExchangeJobToken(ctx context.Context, token, machineId, machineToken, machi
 		return nil, fmt.Errorf("read qoder job token response: %w", errRead)
 	}
 	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("HTTP %d at jobToken body=%s", resp.StatusCode, string(data))
+		return nil, fmt.Errorf("HTTP %d at jobToken body=%s", resp.StatusCode, summarizeBody(data))
 	}
 	var result map[string]interface{}
 	err = json.Unmarshal(data, &result)

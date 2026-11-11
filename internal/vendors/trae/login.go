@@ -623,7 +623,7 @@ func exchangeTraeToken(ctx context.Context, authHost, clientID, userID, refreshT
 		return "", "", 0, fmt.Errorf("read token exchange response: %w", errRead)
 	}
 	if resp.StatusCode >= 400 {
-		return "", "", 0, fmt.Errorf("upstream exchange error %d: %s", resp.StatusCode, string(body))
+		return "", "", 0, fmt.Errorf("upstream exchange error %d: %s", resp.StatusCode, truncateBody(string(body)))
 	}
 
 	var res struct {
@@ -638,7 +638,7 @@ func exchangeTraeToken(ctx context.Context, authHost, clientID, userID, refreshT
 		return "", "", 0, err
 	}
 	if res.Result.Token == "" {
-		return "", "", 0, fmt.Errorf("exchange token failed: %s", string(body))
+		return "", "", 0, fmt.Errorf("exchange token failed: %s", truncateBody(string(body)))
 	}
 
 	exp := res.Result.TokenExpireAt
@@ -741,7 +741,7 @@ func RefreshCredential(ctx context.Context, cred *Credential, cfg Config) (*Cred
 		return nil, false, fmt.Errorf("decode exchange token response: %w", err)
 	}
 	if result.Result.Token == "" {
-		return nil, false, fmt.Errorf("exchange token failed: %s", string(body))
+		return nil, false, fmt.Errorf("exchange token failed: %s", truncateBody(string(body)))
 	}
 
 	expiresAt := result.Result.TokenExpireAt
