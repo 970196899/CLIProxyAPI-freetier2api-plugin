@@ -1093,21 +1093,6 @@ func Encode(plaintext []byte) (string, error) {
 	return string(out), nil
 }
 
-func Decode(encoded string) ([]byte, error) {
-	n := len(encoded)
-	mapped := make([]byte, n)
-	for i := 0; i < n; i++ {
-		c := int(encoded[i])
-		if c >= 128 || c2s[c] < 0 {
-			return nil, fmt.Errorf("char out of custom alphabet: %d", c)
-		}
-		mapped[i] = byte(c2s[c])
-	}
-	a := n / 3
-	std := string(mapped[n-a:]) + string(mapped[a:n-a]) + string(mapped[:a])
-	return base64.StdEncoding.DecodeString(std)
-}
-
 // saltedSeed 保留接口；本实现不使用部署盐（与既有行为一致）。
 func saltedSeed(seed string) string { return seed }
 

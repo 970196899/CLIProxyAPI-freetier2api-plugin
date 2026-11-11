@@ -273,39 +273,4 @@ func WrapTransportError(err error) error {
 	return err
 }
 
-// FriendlyError 供 handler 使用：从任意错误中取出 (对客户端消息, 错误类型)。
-func FriendlyError(err error) (string, string) {
-	if err == nil {
-		return "", ""
-	}
-	var ue *UpstreamError
-	if errors.As(err, &ue) {
-		return ue.Message, ue.ErrType
-	}
-	return err.Error(), "qoder_error"
-}
 
-// ErrorStatus 取错误对应的 HTTP 状态。分类映射优先于上游状态透传：
-//   - 内容审核拒绝 → 400（用户输入问题，客户端应改输入而非重试）
-//   - 瞬时故障耗尽 → 502（不透传上游包装的 418 等无意义状态码）
-//   - 其余结构化错误 → 透传上游合法 4xx/5xx
-//   - 无结构化状态 → 500
-func ErrorStatus(err error) int {
-	var ue *UpstreamError
-	if errors.As(err, &ue) {
-		switch ue.ErrType {
-		case ErrTypeContentPolicy:
-			return 400
-		case ErrTypeTransient:
-			return 502
-		case ErrTypeModelBusy:
-			// 503 而不是 403：排队不是权限/额度问题，403 会被宿主标成 insufficient_quota
-			// （实测：免费模型被误导成“额度用尽”）。503 也会让宿主走重试/故障转移。
-			return 503
-		}
-		if ue.Status >= 400 && ue.Status <= 599 {
-			return ue.Status
-		}
-	}
-	return 500
-}

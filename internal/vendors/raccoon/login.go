@@ -65,11 +65,6 @@ func StoreLoginSession(logins core.LoginSessions, sessionID string, session *Pen
 	logins.Register(VendorID, sessionID, qrLoginTTL, qrPollInterval, session)
 }
 
-// RemoveLoginSession 登录成功或终止后清理会话。
-func RemoveLoginSession(logins core.LoginSessions, sessionID string) {
-	logins.Delete(sessionID)
-}
-
 // CheckLoginSession 检查登录会话状态与节流。
 // 返回 (session, exists, shouldPoll)。
 func CheckLoginSession(logins core.LoginSessions, sessionID string) (*PendingLogin, bool, bool) {
