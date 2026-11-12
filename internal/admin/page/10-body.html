@@ -1,0 +1,156 @@
+<body>
+<header>
+  <h1>FreeTier 2API</h1>
+  <div class="sub">WorkBuddy / Qoder 账号、额度、模型与任务管理 · 本地零凭证存储</div>
+</header>
+<main>
+  <div class="card" id="keyBox" hidden>
+    <h2>管理密钥</h2>
+    <div class="row">
+      <input type="password" id="keyInput" placeholder="填入 CPA 管理密钥（remote-management.secret-key）" class="grow">
+      <button class="act primary" id="btnUseKey">使用</button>
+    </div>
+    <div class="hint">
+      <span id="keyStatus" class="muted"></span><br>
+      本页直接复用 CPA 管理面板已登录的密钥（面板需勾选「记住密码」）；读不到时在此填入一次即可。
+    </div>
+  </div>
+
+  <div id="banner" class="banner"></div>
+
+  <section id="view-accounts">
+    <div class="card">
+      <h2>账号概览 <span class="muted" id="accountCount"></span></h2>
+      <div class="row">
+        <div class="dropdown">
+          <button class="act primary" id="btnAddAccount">添加账号 ▾</button>
+          <div class="dropdown-menu" id="addVendorMenu" hidden></div>
+        </div>
+        <button class="act" id="btnDisableAccounts">停用选中</button>
+        <button class="act" id="btnEnableAccounts">启用选中</button>
+        <button class="act" id="btnSelectAllAccounts">全选</button>
+        <button class="act" id="btnSelectNoneAccounts">清空</button>
+        <button class="act" id="btnRefresh">Token续期</button>
+        <button class="act" id="btnLoadQuotas">查询额度</button>
+        <button class="act" id="btnCheckin">一键签到</button>
+        <button class="act" id="btnAutoAll">一键任务</button>
+        <button class="act danger" id="btnDeleteAccounts" disabled>删除</button>
+        <label>筛选 <input type="text" id="accountFilter" placeholder="如 workbuddy / 邮箱" style="width:160px"></label>
+      </div>
+
+      <div class="card" id="smsBox" hidden>
+        <h2 id="smsTitle">手机验证码登录</h2>
+        <div class="row" style="margin-bottom:8px">
+          <input type="tel" id="inputSmsPhone" placeholder="手机号（11 位）" class="grow-2">
+          <button class="act" id="btnSmsSend">发送验证码</button>
+        </div>
+        <div class="row" style="margin-bottom:8px">
+          <input type="text" id="inputSmsCode" placeholder="6 位短信验证码" class="grow" maxlength="6">
+          <input type="text" id="inputSmsLabel" placeholder="备注名称（可选）" class="grow">
+          <button class="act primary" id="btnSmsVerify">登录并添加</button>
+          <button class="act" id="btnSmsCancel">取消</button>
+        </div>
+        <div class="hint" id="smsStatus">输入手机号获取验证码。</div>
+      </div>
+
+      <div class="card" id="loginBox" hidden>
+        <h2 id="loginTitle">完成授权</h2>
+        <div class="row" id="loginVariantRow" hidden style="display:none"></div>
+        <div class="login-captcha" id="loginCaptcha" hidden></div>
+        <div class="row">
+          <input type="text" id="loginUrl" readonly class="grow">
+          <button class="act" id="btnOpenUrl">打开链接</button>
+          <button class="act" id="btnCopyUrl">复制</button>
+          <button class="act" id="btnLoginCancel">取消</button>
+        </div>
+        <div class="hint" id="loginStatus">等待授权…</div>
+        <details id="loginPasteBox" hidden>
+          <summary>回调没到插件？粘贴回调链接</summary>
+          <div class="hint" id="loginPasteHint"></div>
+          <textarea id="loginPasteUrl" rows="3"
+            placeholder="把浏览器地址栏里的整条 localhost 链接粘贴到这里"></textarea>
+          <div class="row" style="margin-top:8px">
+            <button class="act" id="btnSubmitCallback">提交回调链接</button>
+            <a id="loginPasteRedirect" target="_blank" rel="noopener" hidden>打开华为云登录页</a>
+            <span class="hint" id="loginPasteStatus"></span>
+          </div>
+        </details>
+      </div>
+
+      <div class="card" id="apiKeyBox" hidden>
+        <h2 id="apiKeyTitle">添加 API Key 账号</h2>
+        <div class="row" style="margin-bottom:8px">
+          <input type="password" id="inputApiKey" placeholder="输入 API Key（必填）" class="grow-2">
+          <input type="text" id="inputApiLabel" placeholder="备注名称（可选）" class="grow">
+          <button class="act primary" id="btnSubmitApiKey">保存账号</button>
+          <button class="act" id="btnCancelApiKey">取消</button>
+        </div>
+        <div class="hint" id="apiKeyHint">请输入从官网获取的 API Key，保存后自动在 auth 目录创建凭证。</div>
+      </div>
+
+  <div class="modal" id="claimModal" style="display:none" hidden>
+    <div class="modal-box">
+      <h2 id="claimTitle">套餐领取</h2>
+      <div id="claimPlans" class="muted">正在查询可领套餐…</div>
+      <div class="claim-captcha" id="claimCaptcha"></div>
+      <button id="claimCaptchaBtn" type="button" hidden></button>
+      <div class="hint" id="claimHint"></div>
+      <details id="claimPasteBox" hidden>
+        <summary>验证码脚本加载失败？改用粘贴验证码参数</summary>
+        <input type="text" id="claimVerifyParam" placeholder="粘贴 captchaVerifyParam"
+               style="width:100%;margin-top:8px">
+      </details>
+      <div class="claim-row">
+        <button class="act primary" id="btnClaimConfirm" type="button" disabled>确认领取</button>
+        <button class="act" id="btnClaimCancel" type="button">取消</button>
+      </div>
+    </div>
+  </div>
+
+      <div id="accounts"></div>
+    </div>
+  </section>
+
+  <section>
+    <div class="card">
+      <h2>模型 <span class="muted" id="modelCount"></span></h2>
+      <div class="row">
+        <button class="act primary" id="btnLoadModels">读取模型清单</button>
+        <button class="act" id="btnDisableModels">停用选中</button>
+        <button class="act" id="btnEnableModels">启用选中</button>
+        <button class="act" id="btnSelectAllModels">全选</button>
+        <button class="act" id="btnSelectNoneModels">清空</button>
+        <label>筛选 <input type="text" id="modelFilter" placeholder="如 glm / gpt" style="width:160px"></label>
+        <div class="dropdown cols-setter">
+          <button class="act" id="btnModelCols" aria-haspopup="true" aria-expanded="false"
+                  title="选择要在表格中展示的列">列展示 ▾</button>
+          <div class="dropdown-menu right" id="modelColsMenu" hidden></div>
+        </div>
+      </div>
+      <div class="hint">
+        点击「模型 ID」列的模型名或其右侧 ✎ 即可编辑别名（留空=恢复官方 ID）。<b>不同供应商的模型设成同一别名</b>，宿主会当成一个 ID 自动调度。
+      </div>
+      <div id="models"></div>
+    </div>
+  </section>
+
+  <section id="view-settings">
+    <div class="card">
+      <h2>运行期设置</h2>
+      <div class="row">
+        <label><input type="checkbox" id="setAutoCheckin"> 每日自动签到</label>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <label title="开关只影响签到后自动执行的后续任务：开学季、连登奖励。其它成长任务不随签到自动跑。"><input type="checkbox" id="setAutoTasks"> 签到后自动跑后续任务（开学季 / 连登奖励）</label>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <label title="调用网页端 setting_info 触发服务器发放当日每日积分（幂等，已发不重复）。"><input type="checkbox" id="setRaccoonDailyGrant"> 小浣熊每日积分</label>
+      </div>
+      <div class="row" style="margin-top:12px">
+        <button class="act primary" id="btnSaveSettings">保存设置</button>
+      </div>
+      <div id="scheduleInfo" class="hint"></div>
+    </div>
+  </section>
+
+</main>

@@ -253,6 +253,15 @@ func (s *Service) modelAliasHandler(req pluginapi.ManagementRequest) pluginapi.M
 			"ok": false, "error": "别名不能包含空白字符",
 		})
 	}
+	// 别名与同渠道其它模型的对外 ID 撞车时直接拒绝：改名是「对外 ID 覆盖」，
+	// 撞上别人就等于把那个模型从路由里挤掉（请求会被还原到这个别名指向的
+	// 上游模型），而页面看起来两个模型都在。
+	if conflict := s.deps.Model().AliasConflicts(vendorID, bare, alias); conflict != "" {
+		return JSONResponse(http.StatusBadRequest, map[string]any{
+			"ok":    false,
+			"error": "别名 " + alias + " 与同渠道已有模型 " + conflict + " 的对外 ID 冲突，请换一个名字",
+		})
+	}
 	s.deps.Model().SetAlias(vendorID, bare, alias)
 	return JSONResponse(http.StatusOK, map[string]any{"ok": true})
 }

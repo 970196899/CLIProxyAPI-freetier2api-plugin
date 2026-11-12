@@ -1,0 +1,400 @@
+  // ---- 模型表列定义 ----
+  //
+  // 表头与每行单元格都从这份描述渲染：列顺序与显隐只有一个来源，不会出现
+  // 「表头藏了、单元格还在」的错位。optional 的列默认隐藏，可按浏览器打开。
+  var MODEL_COLUMNS = [
+    { key: "check", header: "", cell: modelCheckCell },
+    { key: "status", header: "状态", cell: modelStatusCell },
+    { key: "vendor", header: "供应商", cell: modelVendorCell },
+    { key: "model", header: "模型 ID", cell: modelIDCell },
+    { key: "name", header: "名称", cell: function (m) {
+      var td = el("td");
+      var span = el("span", m.name || "—", "name-text");
+      if (m.name) span.title = m.name;
+      td.appendChild(span);
+      return td;
+    } },
+    { key: "credits", header: "费用倍率", cell: modelCreditsCell },
+    { key: "context", header: "上下文", cell: function (m) {
+      return el("td", m.context_length ? formatTokens(m.context_length) : "—");
+    } },
+    { key: "output", header: "输出上限", optional: true, defaultShow: false, cell: function (m) {
+      return el("td", m.max_output_tokens ? formatTokens(m.max_output_tokens) : "—");
+    } },
+    { key: "efforts", header: "推理档位", optional: true, defaultShow: false, cell: function (m) {
+      var levels = (m.efforts || []).join(" / ");
+      return el("td", levels || "—", levels ? "" : "muted");
+    } },
+    { key: "caps", header: "能力", optional: true, defaultShow: true, cell: function (m) {
+      var caps = [];
+      if (m.supports_images) caps.push("图片");
+      if (m.supports_tools) caps.push("工具");
+      return el("td", caps.join(" · ") || "—", caps.length ? "" : "muted");
+    } }
+  ];
+
+  // 偏好存为对象映射 { [colKey]: boolean }：
+  // 缺省时按各列的 defaultShow 处理，具备自然扩展性与向后兼容性。
+  var MODEL_COLUMNS_STORE_KEY = "freetier-model-optional-columns";
+  var columnPrefs = readColumnPrefs();
+  var creditsSortOrder = null; // null | "asc" | "desc"
+
+  function readColumnPrefs() {
+    try {
+      var raw = localStorage.getItem(MODEL_COLUMNS_STORE_KEY);
+      if (!raw) return {};
+      var parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        var legacy = {};
+        parsed.forEach(function (k) { legacy[k] = true; });
+        return legacy;
+      }
+      return (parsed && typeof parsed === "object") ? parsed : {};
+    } catch (e) {
+      return {};   // 隐私模式/脏数据：回到默认显隐，不阻塞渲染
+    }
+  }
+
+  function columnVisible(col) {
+    if (!col.optional) return true;
+    if (Object.prototype.hasOwnProperty.call(columnPrefs, col.key)) {
+      return !!columnPrefs[col.key];
+    }
+    return !!col.defaultShow;
+  }
+
+  function visibleColumns() {
+    return MODEL_COLUMNS.filter(columnVisible);
+  }
+
+  // modelCreditValue 解析倍率数值，无有效倍率（包括空/未配置）返回 null。
+  function modelCreditValue(model) {
+    var raw = String(model.credits || "").trim();
+    if (!raw) return null;
+    if (raw === "免费") return 0;
+    var cleaned = raw.replace(/\bcredits?\b/ig, "").replace(/^[xX]/, "").replace(/[xX]$/, "").trim();
+    var num = parseFloat(cleaned);
+    if (!isNaN(num) && isFinite(num) && num >= 0) {
+      return num;
+    }
+    return null;
+  }
+
+  // toggleOptionalColumn 只改本地偏好并重渲染，不发任何请求。
+  // 写入失败（隐私模式/配额）时仍按内存值生效，本次会话不受影响。
+  function toggleOptionalColumn(key, show) {
+    columnPrefs[key] = !!show;
+    try {
+      localStorage.setItem(MODEL_COLUMNS_STORE_KEY, JSON.stringify(columnPrefs));
+    } catch (e) { /* 忽略：仅本次会话生效 */ }
+    renderModels();
+  }
+
+  function renderModels() {
+    var host = document.getElementById("models");
+    host.textContent = "";
+    var filter = (document.getElementById("modelFilter").value || "").trim().toLowerCase();
+    var list = allModels.filter(function (m) {
+      if (!filter) return true;
+      var vendor = vendorLabel(m.vendor_id, m.realm);
+      var bareID = String(m.id || "");
+      var text = (bareID + " " + String(m.name || "") + " " + String(m.alias || "") + " " + vendor).toLowerCase();
+      return text.indexOf(filter) >= 0;
+    });
+
+    // 默认排序方式：状态 + 供应商名称 + 模型 ID（启用在上，禁用在下；同状态内按 供应商名称 + 模型 ID 升序）
+    function compareDefault(a, b) {
+      var statusA = a.disabled ? 1 : 0;
+      var statusB = b.disabled ? 1 : 0;
+      if (statusA !== statusB) return statusA - statusB;
+
+      var vendorA = vendorLabel(a.vendor_id, a.realm);
+      var vendorB = vendorLabel(b.vendor_id, b.realm);
+      if (vendorA !== vendorB) {
+        return vendorA < vendorB ? -1 : 1;
+      }
+
+      var idA = String(a.id || "").replace(/^(cn|global):/, "").toLowerCase();
+      var idB = String(b.id || "").replace(/^(cn|global):/, "").toLowerCase();
+      if (idA !== idB) {
+        return idA < idB ? -1 : 1;
+      }
+      return 0;
+    }
+
+    list.sort(function (a, b) {
+      if (creditsSortOrder) {
+        var valA = modelCreditValue(a);
+        var valB = modelCreditValue(b);
+        var hasA = valA !== null;
+        var hasB = valB !== null;
+        // 没有倍率的排在最后
+        if (hasA && !hasB) return -1;
+        if (!hasA && hasB) return 1;
+        if (hasA && hasB && valA !== valB) {
+          return creditsSortOrder === "asc" ? valA - valB : valB - valA;
+        }
+      }
+      return compareDefault(a, b);
+    });
+    setText("modelCount", allModels.length ? "（" + list.length + " / " + allModels.length + "）" : "");
+
+    // 没有模型时只留一行提示，不要渲染一张全是 "—" 的空表。
+    if (!list.length) {
+      host.appendChild(el("div", allModels.length
+        ? "没有匹配「" + filter + "」的模型。"
+        : "暂无模型清单，正在从上游获取…", "muted"));
+      return;
+    }
+    var columns = visibleColumns();
+    var table = el("table");
+    var head = el("tr");
+    columns.forEach(function (col) {
+      var headerText = col.header;
+      var th = el("th", null, "col-" + col.key);
+      if (col.key === "credits") {
+        th.className += " sortable";
+        th.title = "点击按费用倍率排序（从低到高 / 从高到低 / 恢复默认）";
+        var wrap = el("span", null, "th-sort-wrap");
+        wrap.appendChild(el("span", headerText));
+        var arrows = el("span", null, "sort-arrows" + (creditsSortOrder ? " order-" + creditsSortOrder : ""));
+        arrows.appendChild(el("span", null, "sort-arrow asc"));
+        arrows.appendChild(el("span", null, "sort-arrow desc"));
+        wrap.appendChild(arrows);
+        th.appendChild(wrap);
+        th.addEventListener("click", function () {
+          if (!creditsSortOrder) creditsSortOrder = "asc";
+          else if (creditsSortOrder === "asc") creditsSortOrder = "desc";
+          else creditsSortOrder = null;
+          renderModels();
+        });
+      } else {
+        th.textContent = headerText;
+      }
+      head.appendChild(th);
+    });
+    table.appendChild(head);
+
+    list.forEach(function (model) {
+      var row = el("tr");
+      columns.forEach(function (col) {
+        var cell = col.cell(model);
+        cell.className = (cell.className ? cell.className + " " : "") + "col-" + col.key;
+        row.appendChild(cell);
+      });
+      table.appendChild(row);
+    });
+    host.appendChild(table);
+  }
+
+  // ---- 模型表的单元格 ----
+
+  // 勾选列：用于批量禁用/启用。
+  function modelCheckCell(model) {
+    var cell = el("td");
+    var checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.checked = false;
+    checkbox.setAttribute("data-model-id", model.scope_id || model.id);
+    cell.appendChild(checkbox);
+    return cell;
+  }
+
+  function modelStatusCell(model) {
+    return cellWith(model.disabled ? pill("停用", "err") : pill("启用", "ok"));
+  }
+
+  function modelVendorCell(model) {
+    var vendor = vendorLabel(model.vendor_id, model.realm);
+    return cellWith(pill(vendor, vendorChipClass(model.vendor_id, vendor)));
+  }
+
+  // formatCredits 归一化倍率样式为始终保留两位小数的 "0.50X"；剥除多余的 "credits" 字符，汉字（如 "免费" / "订阅"）保留。
+  function formatCredits(raw) {
+    var str = String(raw || "").trim();
+    if (!str) return "";
+    var cleaned = str.replace(/\bcredits?\b/ig, "").replace(/^[xX]/, "").replace(/[xX]$/, "").trim();
+    var num = parseFloat(cleaned);
+    if (!isNaN(num) && isFinite(num) && /^[0-9]+(\.[0-9]+)?$/.test(cleaned) && num >= 0) {
+      return num.toFixed(2) + "X";
+    }
+    return str;
+  }
+
+  // modelCreditsCell 显示上游给的额度/费用倍率（如 "0.08X"、"免费"）。
+  // 上游没提供时显示「—」：不猜值，避免把「未知」误导成「免费」。
+  function modelCreditsCell(model) {
+    var credits = formatCredits(model.credits);
+    if (!credits) return el("td", "—", "muted");
+    var cell = el("td", credits, "mono");
+    cell.title = "上游计费倍率：" + credits;
+    return cell;
+  }
+
+  // modelIDCell 渲染「模型 ID / 别名」合并列：显示当前生效的对外 ID，
+  // 右侧 ✎ 表示可编辑。未设别名时就是官方 ID，不出现「无别名」这种中间态。
+  //
+  // 交互与键盘处理复用 editableCell；清空保存 = 清除别名，恢复官方 ID。
+  // 保存成功后同步一次宿主注册表——别名的出站翻译本就是即时生效的，这一步
+  // 让 /v1/models 的 ID 也跟着变。
+  //
+  // 编辑框预填「当前生效 ID」（已设别名取别名，否则取官方 ID），省去重敲全名；
+  // 光标置于开头（见 editableCell），便于直接在原名前补平台前缀。
+  function modelIDCell(model) {
+    var bareID = String(model.id || "");
+    var key = String(model.scope_id || model.id);
+    return editableCell({
+      saved: model.alias || "",
+      fallback: function () { return bareID; },
+      prefill: function () { return bareID; },
+      placeholder: bareID,
+      mono: true,
+      title: function (saved) {
+        return saved
+          ? "点击编辑对外模型 ID（留空恢复官方 ID：" + bareID + "）"
+          : "点击编辑对外模型 ID（留空即用官方 ID：" + bareID + "）";
+      },
+      save: function (next) {
+        return api("POST", "/models/alias", { model: key, alias: next }).then(function (data) {
+          if (!data) return false;
+          model.alias = next;
+          syncModelConfig();
+          return true;
+        });
+      }
+    });
+  }
+
+  // selectedModelIDs 取当前勾选的模型（用于批量操作）。
+  function selectedModelIDs() {
+    var ids = [];
+    Array.prototype.forEach.call(
+      document.querySelectorAll("#models input[type=checkbox][data-model-id]"),
+      function (box) { if (box.checked) ids.push(box.getAttribute("data-model-id")); });
+    return ids;
+  }
+
+  // toggleModels 批量禁用/启用选中的模型。
+  //
+  // 落点是**注册层**：被禁用的模型不再注册给宿主，因此 /v1/models 里就会消失，
+  // 客户端请求会被宿主直接拒绝。调用拦截是即时的，注册表由 syncModelConfig
+  // 触发的宿主配置重载来更新。
+  function toggleModels(disabled) {
+    var ids = selectedModelIDs();
+    if (!ids.length) { banner("err", "请先勾选模型"); return; }
+    var verb = disabled ? "停用" : "启用";
+    api("POST", "/models/toggle", { models: ids, disabled: disabled }).then(function (data) {
+      if (!data) return;
+      banner("ok", "已" + verb + " " + (data.changed || ids.length) + " 个模型，正在同步到宿主…");
+      syncModelConfig();
+      loadModels(false);
+    }).catch(function (err) { banner("err", err.message); });
+  }
+
+  // ---- 模型变更的生效 ----
+  //
+  // 禁用/启用与别名改的是插件状态，宿主只在重建模型注册表（plugin.register /
+  // plugin.reconfigure）后更新 /v1/models。宿主没有 reload 端点，但写插件配置会
+  // 触发一次配置重载，重载时宿主回调插件 reconfigure，注册表随之重建。
+  //
+  // 宿主按配置文件 hash 判断是否需要重载，内容不变会直接跳过，所以这里写入
+  // config_reloaded_at（本插件配置的更新时间）来制造内容变化。插件解析器对未知键
+  // 宽容，该键只进配置原文表，不产生任何行为。
+  var MODEL_SYNC_DEBOUNCE_MS = 400;
+  var modelSyncTimer = null;
+  var modelSyncRunning = false;
+  var modelSyncPending = false;
+  // 自愈只尝试一次：restart_pending 长时间为 true 时（宿主不支持自动重载），
+  // 不能让每次 /status 都去写一遍配置。
+  var modelSyncSelfHealed = false;
+
+  // syncModelConfig 请求宿主重载插件配置，使模型注册表与最新状态一致。
+  // 连续操作（批量勾选、接连改别名）由防抖合并；同一时刻只跑一次，运行期间
+  // 又来的变更在结束后补跑一次。
+  function syncModelConfig() {
+    if (modelSyncTimer) { clearTimeout(modelSyncTimer); }
+    modelSyncTimer = setTimeout(runModelSync, MODEL_SYNC_DEBOUNCE_MS);
+  }
+
+  function runModelSync() {
+    modelSyncTimer = null;
+    if (modelSyncRunning) { modelSyncPending = true; return; }
+    modelSyncRunning = true;
+    var configPath = hostPath("/plugins/freetier/config");
+    api("GET", configPath).then(function (config) {
+      // GET 返回的可能是空对象（该插件段尚未落过自定义配置），补成对象再合并。
+      var body = (config && typeof config === "object") ? config : {};
+      body.config_reloaded_at = new Date().toISOString();
+      return api("PATCH", configPath, body);
+    }).then(function () {
+      loadModels(false);
+    }).catch(function (err) {
+      // 失败必须让用户知道：调用拦截已生效，但 /v1/models 的增删还没同步。
+      banner("err", "模型列表同步失败：" + err.message
+        + "（可再操作一次重试；宿主版本过老时需手动重启一次）");
+    }).then(function () {
+      modelSyncRunning = false;
+      if (modelSyncPending) { modelSyncPending = false; syncModelConfig(); }
+    });
+  }
+
+  // formatTokens 把 token 数格式化为可读串。
+  function formatTokens(value) {
+    var n = Number(value) || 0;
+    if (n >= 1048576) return (n / 1048576).toFixed(1).replace(/\.0$/, "") + "M";
+    if (n >= 1024) return Math.round(n / 1024) + "K";
+    return String(n);
+  }
+
+  // modelsLoaded 标记是否已尝试过拉取，避免自动刷新与手动刷新互相触发。
+  var modelsLoaded = false;
+  // modelsPollLeft 是等待后端补探测完成的剩余轮询次数。
+  var modelsPollLeft = 2;
+
+  // loadModels 读取模型清单；本地缓存为空时自动触发一次上游刷新。
+  //
+  // 进入管理页就自动获取，用户不必先点按钮——首次安装或换机时缓存是空的，
+  // 此时再打一次上游把它填上。
+  function loadModels(autoRefresh) {
+    api("GET", "/models").then(function (data) {
+      if (!data) return;
+      allModels = (data && data.models) || [];
+      renderModels();
+      setText("modelCount", allModels.length ? "（" + allModels.length + "）" : "");
+      // 后端仍在为缺缓存的供应商补探测：最多等二轮（约 6 秒）再收手，
+      // 避免页面停在「少了几家」的半成品状态，也不会无限轮询。
+      if (data && data.pending_probes && modelsPollLeft > 0) {
+        modelsPollLeft--;
+        setTimeout(function () { loadModels(false); }, 3000);
+        return;
+      }
+      if (allModels.length || !autoRefresh || modelsLoaded) return;
+      modelsLoaded = true;
+      // 缓存为空：自动从上游拉一次（只做一次，避免失败时反复打上游）。
+      refreshModels(true);
+    }).catch(function (err) { banner("err", err.message); });
+  }
+
+  // refreshModels 手动「读取模型清单」：真正去上游拉一次再回读列表。
+  //
+  // 之前这个按钮绑的是 loadModels（只重读本地缓存），所以缓存一旦是空的，
+  // 点它永远没反应。失败时把上游错误原样显示出来——401 与超时的处理方式
+  // 完全不同，藏进日志等于让用户自己猜。
+  function refreshModels(quiet) {
+    var btn = document.getElementById("btnLoadModels");
+    if (btn) btn.disabled = true;
+    modelsLoaded = true;        // 已手动刷新，不再触发首屏自动刷新
+    modelsPollLeft = 2;
+    if (!quiet) banner("ok", "正在从上游拉取模型清单…", 0);
+    api("POST", "/models/refresh", {}).then(function (data) {
+      var count = (data && data.models) || 0;
+      if (!quiet) {
+        banner(count ? "ok" : "warn",
+          count ? ("已从上游拉取 " + count + " 个模型") : "上游返回 0 个模型，请查看运行日志", 6000);
+      }
+      return loadModels(false);
+    }).catch(function (err) {
+      if (!quiet) banner("err", "从上游刷新失败：" + err.message, 10000);
+    }).then(function () { if (btn) btn.disabled = false; });
+  }
+

@@ -2,6 +2,8 @@ package admin
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net/http"
 	"regexp"
 	"strings"
@@ -209,7 +211,7 @@ func (s *Service) finishQuotaRun(done chan struct{}) {
 func (s *Service) runQuotaBatch(done chan struct{}, jobs []quotaJob) {
 	defer s.finishQuotaRun(done)
 
-	ctx, cancel := context.WithTimeout(hostbridge.WithCallbackID(context.Background(), ""), requestTimeout)
+	ctx, cancel := context.WithTimeout(hostbridge.WithCallbackID(context.Background(), ""), quotaBatchBudget(len(jobs)))
 	defer cancel()
 
 	outcomes := accountpkg.RunBatch(jobs, batchConcurrency, func(current quotaJob) (outcome quotaBatchOutcome) {
@@ -226,7 +228,10 @@ func (s *Service) runQuotaBatch(done chan struct{}, jobs []quotaJob) {
 			}
 			s.cacheQuotaResult(result)
 		}()
-		quota, errQuota := s.queryQuota(ctx, current)
+		// 每个账号独立预算：批次 ctx 只负责整体收口，真正的超时归单个账号。
+		accountCtx, cancelAccount := context.WithTimeout(ctx, quotaAccountTimeout)
+		quota, errQuota := s.queryQuota(accountCtx, current)
+		cancelAccount()
 		if errQuota != nil {
 			identity := current.identity()
 			if kept, okKept := keepLastQuota(s.getCachedQuota(identity.VendorID, identity.UID, identity.AuthID), errQuota); okKept {
@@ -234,7 +239,7 @@ func (s *Service) runQuotaBatch(done chan struct{}, jobs []quotaJob) {
 				outcome.result = kept
 				return outcome
 			}
-			outcome.result.Message = errQuota.Error()
+			outcome.result.Message = quotaErrorText(errQuota)
 			return outcome
 		}
 		result := &outcome.result
@@ -289,6 +294,21 @@ func (s *Service) runQuotaBatch(done chan struct{}, jobs []quotaJob) {
 			}
 		})
 	}
+}
+
+// quotaErrorText 把上下文类错误翻成用户能看懂、且知道下一步做什么的文案。
+//
+// 直接显示 "context deadline exceeded" 有两个问题：一是用户不知道这是
+// 「这个账号这次没排上队/上游太慢」，二是看起来像插件坏了。这里明确告诉
+// 他下次查询会重试——确实会，缓存只活到下一轮。
+func quotaErrorText(err error) string {
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		return fmt.Sprintf("查询超时（%d 秒）：上游未在预算内返回，下次查询会重试", int(quotaAccountTimeout.Seconds()))
+	case errors.Is(err, context.Canceled):
+		return "查询已取消：页面关闭或请求中断，下次查询会重试"
+	}
+	return err.Error()
 }
 
 // retryableStatusRE 匹配错误文案里的 5xx 状态码（502/503/504…）与「5xx」写法。

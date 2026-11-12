@@ -7,7 +7,6 @@ package admin
 // 真正原因。0.1.35 的「一键任务」就踩了这个坑：Handle 里有分支、路由表没声明。
 
 import (
-	"os"
 	"regexp"
 	"strings"
 	"testing"
@@ -16,10 +15,9 @@ import (
 var consoleAPICall = regexp.MustCompile(`api\(\s*"([A-Za-z]+)"\s*,\s*"([^"$+]*)"`)
 
 func TestConsoleCallsAreRegisteredRoutes(t *testing.T) {
-	raw, err := os.ReadFile("console.html")
-	if err != nil {
-		t.Fatalf("read console.html: %v", err)
-	}
+	// 页面已拆成 page/*.html 片段，这里读拼接后的整页：正则跨片段也能匹配，
+	// 且断言的是「用户实际拿到的那份页面」，不会漏掉某个片段里的调用。
+	raw := []byte(Page("/plugins/freetier"))
 	service := newService(t)
 	id := service.deps.Identity()
 

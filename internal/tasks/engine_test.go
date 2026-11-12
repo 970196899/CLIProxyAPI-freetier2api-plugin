@@ -123,7 +123,7 @@ func TestEffectiveScheduleGatesRaccoonDailyGrant(t *testing.T) {
 	service := &Service{deps: deps, catalog: NewCatalog(registry)}
 
 	// 默认（开关未设置）→ 配置默认开启 → 排程含该族。
-	on := service.effectiveSchedule()
+	on := service.effectiveScheduleMinutes()
 	if _, ok := on[core.TaskKindRaccoonDailyGrant]; !ok {
 		t.Fatalf("默认开启时排程应含 raccoon_daily_grant，得到 %v", on)
 	}
@@ -131,7 +131,7 @@ func TestEffectiveScheduleGatesRaccoonDailyGrant(t *testing.T) {
 	// 页面设置关闭 → 排程移除。
 	off := false
 	deps.state.AutoRaccoonDailyGrant = &off
-	offSchedule := service.effectiveSchedule()
+	offSchedule := service.effectiveScheduleMinutes()
 	if _, ok := offSchedule[core.TaskKindRaccoonDailyGrant]; ok {
 		t.Fatalf("开关关闭时排程应移除 raccoon_daily_grant，得到 %v", offSchedule)
 	}
@@ -139,7 +139,7 @@ func TestEffectiveScheduleGatesRaccoonDailyGrant(t *testing.T) {
 	// 页面设置开启 → 排程保留。
 	onFlag := true
 	deps.state.AutoRaccoonDailyGrant = &onFlag
-	onAgain := service.effectiveSchedule()
+	onAgain := service.effectiveScheduleMinutes()
 	if _, ok := onAgain[core.TaskKindRaccoonDailyGrant]; !ok {
 		t.Fatalf("开关开启时排程应含 raccoon_daily_grant，得到 %v", onAgain)
 	}

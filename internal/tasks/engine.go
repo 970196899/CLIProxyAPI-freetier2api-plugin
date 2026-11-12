@@ -85,12 +85,13 @@ func (s *Service) runTaskBatch(ctx context.Context, kinds []string) {
 
 // nextScheduledWake 返回下一次唤醒时刻与要执行的任务族。
 func (s *Service) nextScheduledWake(now time.Time) ([]string, time.Time) {
-	return NextWake(now, s.effectiveSchedule())
+	return NextWakeMinutes(now, s.effectiveScheduleMinutes())
 }
 
-// effectiveSchedule 返回生效的排程（页面设置优先于默认值）。
-func (s *Service) effectiveSchedule() map[string][]int {
-	schedule := s.catalog.EffectiveSchedule(s.deps.State().TaskSchedules)
+// effectiveScheduleMinutes 返回生效的排程（分钟粒度，页面设置优先于默认值）。
+func (s *Service) effectiveScheduleMinutes() map[string][]int {
+	state := s.deps.State()
+	schedule := s.catalog.EffectiveScheduleMinutes(state.TaskSchedules, state.TaskScheduleMinutes)
 	// auto_checkin_at 是用户明确配置的签到时刻，始终并入排程。
 	//
 	// 原先只在「任务排程里没有 checkin 覆盖」时才生效，但 task_schedules 在
@@ -98,8 +99,8 @@ func (s *Service) effectiveSchedule() map[string][]int {
 	// 被忽略——表现为「设了自动签到时间不生效」，Qoder 的 10:00 领取窗口
 	// 也永远跑空。这里改成并集：排程里的点保留作重试，设置里的点必定执行。
 	if s.effectiveAutoCheckin() {
-		if hour, okHour := parseClockHour(s.checkinAt()); okHour {
-			schedule[core.TaskKindCheckin] = mergeHour(schedule[core.TaskKindCheckin], hour)
+		if minute, okMinute := parseClockMinute(s.checkinAt()); okMinute {
+			schedule[core.TaskKindCheckin] = mergeMinute(schedule[core.TaskKindCheckin], minute)
 		}
 	}
 	// 小浣熊「每日积分」按开关门控：关闭时从排程移除，不执行。
@@ -118,28 +119,25 @@ func (s *Service) checkinAt() string {
 	return strings.TrimSpace(s.deps.Config().AutoCheckinAt)
 }
 
-// mergeHour 把一个整点并进排程小时列表，复用 NormalizeHours 做去重与排序。
+// mergeMinute 把一个分钟点并进排程，复用 NormalizeMinutes 做去重与排序。
 //
-// 这里曾自己写一份去重+排序，和 NormalizeHours 的规则分头演进（前者不校验
-// 0-23 边界、后者校验），并出来一条 24 点的排程不会被任何人发现。
-func mergeHour(hours []int, hour int) []int {
-	return NormalizeHours(append(hours, hour))
+// 这里曾自己写一份去重+排序，和归一化函数的规则分头演进（前者不校验
+// 边界、后者校验），并出来一条 24 点的排程不会被任何人发现。
+func mergeMinute(minutes []int, minute int) []int {
+	return NormalizeMinutes(append(minutes, minute))
 }
 
-// parseClockHour 把 HH:MM 转成排程用的整点小时。
+// parseClockMinute 把 HH:MM 转成当天的分钟数。
 //
-// 排程粒度是整点，分钟部分向上取整而不是丢弃：用户写 10:35 就是希望
-// 10:35 之后才跑（签到窗口常常 10:30 才开），按 10:00 执行会跑空。
-// 23:xx 取整后落到次日 00:00，同样不早于设定时刻。
-func parseClockHour(value string) (int, bool) {
+// 排程升级到分钟粒度后，这里**不再向上取整**：用户写 10:35 就在 10:35 跑。
+// 原先整点排程必须取整（10:35 → 11:00），代价是签到窗口 10:30 开、11:00 才
+// 跑；现在窗口与执行时刻可以对齐。
+func parseClockMinute(value string) (int, bool) {
 	hour, minute, ok := core.ParseClock(value)
 	if !ok {
 		return 0, false
 	}
-	if minute > 0 {
-		hour = (hour + 1) % 24
-	}
-	return hour, true
+	return hour*60 + minute, true
 }
 
 // pokeScheduler 唤醒调度循环重新计算下次执行时刻。
@@ -161,11 +159,20 @@ func (s *Service) schedulerStatus() map[string]any {
 	running := s.running
 	s.schedulerMu.Unlock()
 
-	schedule := s.effectiveSchedule()
+	schedule := s.effectiveScheduleMinutes()
 	kinds, next := s.nextScheduledWake(s.deps.Now())
+	// 对外同时给两份：schedule 是分钟数（0-1439，新语义），schedule_hhmm 是
+	// 同一份排程的可读形式（"10:35"）。只给分钟数会让面板/脚本拿到 635 这种
+	// 数字无从解释，只给 HH:MM 又没法直接参与计算。
 	readable := make(map[string][]int, len(schedule))
-	for kind, hours := range schedule {
-		readable[kind] = hours
+	hhmm := make(map[string][]string, len(schedule))
+	for kind, minutes := range schedule {
+		readable[kind] = minutes
+		labels := make([]string, 0, len(minutes))
+		for _, minute := range minutes {
+			labels = append(labels, formatMinute(minute))
+		}
+		hhmm[kind] = labels
 	}
 	// 页面上直接显示「下次执行」的时刻，不要贴 RFC3339：面板用户看到的应该是
 	// 「10:00」而不是「2026-10-31T10:00:00+08:00」。跨天时补上日期。
@@ -175,14 +182,24 @@ func (s *Service) schedulerStatus() map[string]any {
 		nextLabel = next.Format("01-02 15:04")
 	}
 	return map[string]any{
-		"running":    running,
-		"schedule":   readable,
-		"next_at":    next.Format(time.RFC3339),
-		"next_hhmm":  nextLabel,
-		"next_tasks": kinds,
-		"auto_tasks": s.effectiveAutoTasks(),
-		"task_specs": s.catalog.Specs(),
+		"running":       running,
+		"schedule":      readable,
+		"schedule_hhmm": hhmm,
+		"next_at":       next.Format(time.RFC3339),
+		"next_hhmm":     nextLabel,
+		"next_tasks":    kinds,
+		"auto_tasks":    s.effectiveAutoTasks(),
+		"task_specs":    s.catalog.Specs(),
 	}
+}
+
+// formatMinute 把当天分钟数格式化成 HH:MM。
+func formatMinute(minute int) string {
+	if minute < 0 {
+		minute = 0
+	}
+	minute %= 1440
+	return fmt.Sprintf("%02d:%02d", minute/60, minute%60)
 }
 
 // effectiveAutoTasks 返回是否启用任务自动闭环（页面设置优先）。
@@ -215,12 +232,22 @@ func (s *Service) effectiveAutoCheckin() bool {
 
 // effectiveSettings 返回页面设置与配置合并后的可读视图。
 func (s *Service) effectiveSettings() map[string]any {
+	schedule := s.effectiveScheduleMinutes()
+	hhmm := make(map[string][]string, len(schedule))
+	for kind, minutes := range schedule {
+		labels := make([]string, 0, len(minutes))
+		for _, minute := range minutes {
+			labels = append(labels, formatMinute(minute))
+		}
+		hhmm[kind] = labels
+	}
 	return map[string]any{
 		"auto_checkin":             s.effectiveAutoCheckin(),
 		"auto_checkin_at":          s.checkinAt(),
 		"auto_tasks":               s.effectiveAutoTasks(),
 		"auto_raccoon_daily_grant": s.effectiveAutoRaccoonDailyGrant(),
-		"schedule":                 s.effectiveSchedule(),
+		"schedule":                 schedule,
+		"schedule_hhmm":            hhmm,
 		"task_specs":               s.catalog.Specs(),
 	}
 }

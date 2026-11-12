@@ -115,33 +115,114 @@ func NormalizeHours(hours []int) []int {
 	return out
 }
 
-// NextWake 返回下一次唤醒时刻与要执行的任务族。
-func NextWake(now time.Time, schedule map[string][]int) ([]string, time.Time) {
-	byHour := map[int][]string{}
-	hours := make([]int, 0, len(schedule))
-	for kind, list := range schedule {
-		for _, hour := range NormalizeHours(list) {
-			if _, okHour := byHour[hour]; !okHour {
-				hours = append(hours, hour)
-			}
-			byHour[hour] = append(byHour[hour], kind)
+// HoursToMinutes 把整点列表换算成当天的分钟数（0-1439）。
+func HoursToMinutes(hours []int) []int {
+	out := make([]int, 0, len(hours))
+	for _, hour := range NormalizeHours(hours) {
+		out = append(out, hour*60)
+	}
+	return out
+}
+
+// NormalizeMinutes 去重、排序并过滤非法分钟（0-1439）。
+func NormalizeMinutes(minutes []int) []int {
+	seen := map[int]bool{}
+	out := make([]int, 0, len(minutes))
+	for _, minute := range minutes {
+		if minute < 0 || minute > 1439 || seen[minute] {
+			continue
+		}
+		seen[minute] = true
+		out = append(out, minute)
+	}
+	sort.Ints(out)
+	return out
+}
+
+// DefaultScheduleMinutes 返回默认排程（分钟表示）。
+func (c *Catalog) DefaultScheduleMinutes() map[string][]int {
+	out := map[string][]int{}
+	for kind, hours := range c.DefaultSchedule() {
+		out[kind] = HoursToMinutes(hours)
+	}
+	return out
+}
+
+// EffectiveScheduleMinutes 合并默认值、整点覆盖与分钟覆盖。
+//
+// 两级覆盖而不是直接改字段：task_schedules（整点）是存量配置，任务排程
+// 写入后不会自动迁移；分钟级是新能力，只在用户显式设置时生效。两者同时
+// 存在时分钟优先——否则「设了 10:35」会被同族的整点覆盖打回 10:00。
+func (c *Catalog) EffectiveScheduleMinutes(hoursOverrides, minuteOverrides map[string][]int) map[string][]int {
+	out := c.DefaultScheduleMinutes()
+	for kind, hours := range hoursOverrides {
+		kind = strings.TrimSpace(kind)
+		if kind == "" {
+			continue
+		}
+		if _, known := c.SpecByKind(kind); !known {
+			continue
+		}
+		if len(hours) > 0 {
+			out[kind] = NormalizeMinutes(HoursToMinutes(hours))
 		}
 	}
-	if len(hours) == 0 {
+	for kind, minutes := range minuteOverrides {
+		kind = strings.TrimSpace(kind)
+		if kind == "" {
+			continue
+		}
+		if _, known := c.SpecByKind(kind); !known {
+			continue
+		}
+		if len(minutes) > 0 {
+			out[kind] = NormalizeMinutes(minutes)
+		}
+	}
+	return out
+}
+
+// NextWakeMinutes 返回下一次唤醒时刻与要执行的任务族（分钟粒度）。
+//
+// 分钟粒度是排程的最小单位：签到窗口常常 10:30 才开，整点排程只能二选一
+// ——要么 10:00 跑空，要么 11:00 晚半小时。
+func NextWakeMinutes(now time.Time, schedule map[string][]int) ([]string, time.Time) {
+	byMinute := map[int][]string{}
+	minutes := make([]int, 0, len(schedule))
+	for kind, list := range schedule {
+		for _, minute := range NormalizeMinutes(list) {
+			if _, okMinute := byMinute[minute]; !okMinute {
+				minutes = append(minutes, minute)
+			}
+			byMinute[minute] = append(byMinute[minute], kind)
+		}
+	}
+	if len(minutes) == 0 {
 		return nil, now.Add(time.Hour)
 	}
-	sort.Ints(hours)
-	for _, hour := range hours {
-		candidate := time.Date(now.Year(), now.Month(), now.Day(), hour, 0, 0, 0, now.Location())
+	sort.Ints(minutes)
+	midnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	for _, minute := range minutes {
+		candidate := midnight.Add(time.Duration(minute) * time.Minute)
 		if candidate.After(now) {
-			sort.Strings(byHour[hour])
-			return byHour[hour], candidate
+			sort.Strings(byMinute[minute])
+			return byMinute[minute], candidate
 		}
 	}
-	first := hours[0]
-	tomorrow := now.AddDate(0, 0, 1)
-	sort.Strings(byHour[first])
-	return byHour[first], time.Date(tomorrow.Year(), tomorrow.Month(), tomorrow.Day(), first, 0, 0, 0, now.Location())
+	first := minutes[0]
+	sort.Strings(byMinute[first])
+	return byMinute[first], midnight.AddDate(0, 0, 1).Add(time.Duration(first) * time.Minute)
+}
+
+// NextWake 返回下一次唤醒时刻与要执行的任务族（整点入参，分钟实现）。
+//
+// 保留整点签名是为了不让存量调用点与测试跟着改：换算在入口处一次完成。
+func NextWake(now time.Time, schedule map[string][]int) ([]string, time.Time) {
+	minutes := make(map[string][]int, len(schedule))
+	for kind, hours := range schedule {
+		minutes[kind] = HoursToMinutes(hours)
+	}
+	return NextWakeMinutes(now, minutes)
 }
 
 func (c *Catalog) anyCheckin() bool {

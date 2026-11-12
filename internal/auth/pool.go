@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"freetier2api-plugin/internal/core"
 	"freetier2api-plugin/internal/hostbridge"
@@ -26,11 +27,57 @@ type Resolver func(ctx context.Context, callbackID string, storageJSON []byte, a
 type Pool struct {
 	Registry *core.Registry
 	Resolve  Resolver
+
+	// authJSON 缓存「按 auth_index 取凭证原文」的结果，消掉 /status 的
+	// N 次宿主 RPC（见 authjson_cache.go）。
+	authJSON *authJSONCache
 }
 
 // NewPool 构造账号池。
 func NewPool(registry *core.Registry, resolve Resolver) *Pool {
-	return &Pool{Registry: registry, Resolve: resolve}
+	return &Pool{Registry: registry, Resolve: resolve, authJSON: newAuthJSONCache(authJSONTTL)}
+}
+
+// InvalidateCredentialCache 丢弃凭证原文缓存。
+//
+// 本插件自己改写凭证（登录回调落盘、刷新令牌）之后必须调用：缓存按
+// auth_index + 文件 mtime 判失效，若宿主写入后 mtime 精度不足（同一秒内
+// 覆盖），下一次读取会拿到旧原文。
+func (p *Pool) InvalidateCredentialCache() {
+	if p == nil {
+		return
+	}
+	p.authJSON.reset()
+}
+
+// loadAuthJSON 取账号凭证原文，命中缓存时跳过宿主 RPC。
+func (p *Pool) loadAuthJSON(ctx context.Context, callbackID string, entry core.HostAuth) ([]byte, string, bool) {
+	key := strings.TrimSpace(entry.AuthIndex)
+	if key == "" {
+		key = strings.TrimSpace(entry.ID)
+	}
+	path := strings.TrimSpace(entry.Path)
+	var modTime time.Time
+	if path != "" {
+		// stat 失败不算错：文件可能还没落盘（宿主先建索引后写文件），
+		// 这时 modTime 留零值，缓存只靠 TTL 失效。
+		if info, errStat := os.Stat(path); errStat == nil {
+			modTime = info.ModTime()
+		}
+	}
+	if cached, okCached := p.authJSON.get(key, path, modTime); okCached {
+		return cached.raw, cached.filePath, true
+	}
+	raw, filePath, okRaw := hostbridge.AuthJSONAndPath(ctx, callbackID, entry.AuthIndex)
+	if !okRaw && path != "" {
+		if data, errRead := os.ReadFile(path); errRead == nil && len(data) > 0 {
+			raw, filePath, okRaw = data, path, true
+		}
+	}
+	if okRaw && len(raw) > 0 {
+		p.authJSON.put(key, path, modTime, raw, filePath)
+	}
+	return raw, filePath, okRaw
 }
 
 // Account 是一个已解析的可用账号。
@@ -83,12 +130,7 @@ func (p *Pool) Load(ctx context.Context, callbackID string, opts Options) ([]Acc
 		if len(wanted) > 0 && !wanted[entry.ID] && !wanted[entry.Name] && !wanted[entry.AuthIndex] {
 			continue
 		}
-		raw, filePath, okRaw := hostbridge.AuthJSONAndPath(ctx, callbackID, entry.AuthIndex)
-		if !okRaw && strings.TrimSpace(entry.Path) != "" {
-			if data, errRead := os.ReadFile(entry.Path); errRead == nil && len(data) > 0 {
-				raw, filePath, okRaw = data, entry.Path, true
-			}
-		}
+		raw, filePath, okRaw := p.loadAuthJSON(ctx, callbackID, entry)
 		if !okRaw || len(raw) == 0 {
 			failures = append(failures, Failure{Entry: entry, Message: "凭证读取失败"})
 			continue

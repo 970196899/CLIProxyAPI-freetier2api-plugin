@@ -1,0 +1,270 @@
+  // ---- 额度 ----
+
+  // loadQuotas 查询账号额度（targets 为空表示全部）。
+  //
+  // 结果**不由页面截留**：后端查询时就把每个账号的结果写进自己的缓存，
+  // /status 下一次返回的 accounts[].quota 即是权威数据。页面若再存一份，
+  // 就会出现两套键（后端按账号身份、页面按 5 个候选键猜测），两边不一致时
+  // 表现为额度永久消失。这里只需在查询完成后重拉账号表。
+  //
+  // quiet 为 true 时不弹横幅——进入页面会自动跑一次，那时不需要打扰用户；
+  // 手动点按钮时才给反馈。
+  function loadQuotas(quiet, targets) {
+    if (!quiet) banner("ok", "正在查询账号额度…", 0);
+    // 额度批量是慢接口：后端一轮最多三分钟，用普通档会把正常请求掐掉。
+    return api("POST", "/quotas", { account_ids: targets || [] }, { timeout: API_SLOW_TIMEOUT_MS }).then(function (data) {
+      if (!data) return;
+      var results = (data && data.results) || [];
+      var failures = results.filter(function (r) { return !r.ok; });
+      if (!quiet) {
+        if (!failures.length) {
+          banner("ok", "额度查询完成：" + results.length + " 个账号", 5000);
+        } else {
+          // 只给「N 个失败」时用户不知道是哪个账号、什么原因，只能逐个试；
+          // 逐条列出前 5 个，其余折叠成计数，避免横幅无限长。
+          var detail = failures.slice(0, 5).map(function (r) {
+            var who = r.label || r.name || r.auth_id || "未知账号";
+            var vendor = r.vendor_name || r.vendor_id || "未知供应商";
+            return vendor + " / " + who + "：" + (r.message || "未知错误");
+          });
+          if (failures.length > detail.length) {
+            detail.push("…等 " + failures.length + " 个账号失败");
+          }
+          banner("warn", "额度查询完成：" + results.length + " 个账号，" +
+            failures.length + " 个失败\n" + detail.join("\n"), 12000);
+        }
+      }
+      return loadStatus(true);
+    }).catch(function (err) {
+      // 同 loadStatus：只报一次，不 rethrow。调用点里 loadQuotas(true) 大多
+      // 没有 .catch，抛出去只会变成 unhandled rejection。
+      if (!quiet) banner("err", err.message, 8000);
+      return null;
+    });
+  }
+
+  // ---- 套餐领取 ----
+
+  // claimContext 是当前弹窗的上下文（弹窗同一时刻只有一个账号在办理）。
+  var claimContext = null;
+
+  // claimButtonSpec 依据账号的领取状态给出按钮文案与可用性。
+  //
+  // 状态来自额度查询的附带结果 accounts[].claim：额度查询本来就打
+  // billing/current 与 billing/preview，控制台每次进页面都会刷一次额度，
+  // 所以这里不需要额外的轮询端点。
+  function claimButtonSpec(account) {
+    if (!account.supports_claim) return null;
+    var claim = account.claim || {};
+    // error 只表示取数失败（上游挂了 / 鉴权失效 / 限流）：按钮保持可点作为
+    // 重试入口，但文案必须明确是「查询失败」，不能假装「套餐领取」可领——
+    // 那会让用户以为有套餐可领，点下去却是「上游限流」。
+    if (claim.error) return { text: "查询失败·重试", disabled: false, title: claim.error };
+    // 未检测过（初次加载）或有待领套餐
+    if (!claim.checked_at || claim.claimable > 0) {
+      // 可领数量比说明更有用：说明只解释「为什么现在没有额度」，不该盖掉
+      // 「有 N 个套餐可领」这个可操作信息。
+      return { text: "套餐领取", disabled: false, title: claim.claimable ? (claim.claimable + " 个套餐可领") : (claim.note || "点击查询可领套餐") };
+    }
+    // 已全部领取
+    return { text: "已领取", disabled: true, title: claim.note || "已领取当前全部套餐" };
+  }
+
+  // openClaimModal 打开领取弹窗并实时拉取可领套餐。
+  function openClaimModal(account) {
+    var modal = document.getElementById("claimModal");
+    var plans = document.getElementById("claimPlans");
+    var captchaBox = document.getElementById("claimCaptcha");
+    var hint = document.getElementById("claimHint");
+    var pasteBox = document.getElementById("claimPasteBox");
+    document.getElementById("claimTitle").textContent = "套餐领取 · " + accountDisplay(account);
+    plans.textContent = "正在查询可领套餐…";
+    captchaBox.textContent = "";
+    hint.textContent = "";
+    pasteBox.hidden = true;
+    document.getElementById("claimVerifyParam").value = "";
+    document.getElementById("btnClaimConfirm").disabled = true;
+
+    // 显式展现弹窗
+    modal.removeAttribute("hidden");
+    modal.hidden = false;
+    modal.style.display = "flex";
+
+    claimContext = { account: account, planId: "", verifyParam: "", captcha: null };
+    api("POST", "/plans/preview", { account_id: account.auth_id || account.auth_index })
+      .then(function (data) {
+        if (!claimContext || claimContext.account !== account) return;
+        if (!data) return;
+        if (!data.ok) {
+          plans.textContent = data.message || "查询失败";
+          return;
+        }
+        if (!data.plans || !data.plans.length) {
+          plans.textContent = "已领取当前全部套餐，暂无新的可领活动。";
+          return;
+        }
+        renderClaimPlans(data.plans);
+        if (data.captcha) {
+          setupClaimCaptcha(data.captcha);
+        } else {
+          document.getElementById("btnClaimConfirm").disabled = false;
+        }
+      })
+      .catch(function (err) {
+        if (!claimContext || claimContext.account !== account) return;
+        plans.textContent = err.message || "查询套餐失败";
+      });
+  }
+
+  // closeClaimModal 关闭弹窗并丢弃上下文（防止下次打开时用上一次的令牌）。
+  function closeClaimModal() {
+    var modal = document.getElementById("claimModal");
+    modal.setAttribute("hidden", "");
+    modal.hidden = true;
+    modal.style.display = "none";
+    document.getElementById("claimCaptcha").textContent = "";
+    claimContext = null;
+  }
+
+  // renderClaimPlans 列出可领套餐，单选，默认选中优先级最高（列表首个）。
+  function renderClaimPlans(plans) {
+    var host = document.getElementById("claimPlans");
+    host.textContent = "";
+    plans.forEach(function (plan, index) {
+      var card = el("div", null, "plan" + (index === 0 ? " selected" : ""));
+      card.appendChild(el("div", plan.name || plan.plan_id, "plan-title"));
+      if (plan.description) card.appendChild(el("div", plan.description, "muted"));
+      if (plan.grants && plan.grants.length) {
+        card.appendChild(el("div", plan.grants.map(function (g) {
+          return g.model + " " + formatGrantUnits(g.units) + (g.period ? "（" + g.period + "）" : "");
+        }).join(" · "), "plan-grants"));
+      }
+      card.addEventListener("click", function () {
+        var all = host.querySelectorAll(".plan");
+        for (var i = 0; i < all.length; i++) all[i].classList.remove("selected");
+        card.classList.add("selected");
+        claimContext.planId = plan.plan_id;
+      });
+      host.appendChild(card);
+      if (index === 0) claimContext.planId = plan.plan_id;
+    });
+  }
+
+  // formatGrantUnits 把 token 额度写成可读形式（12.5万 tokens / 1.2亿 tokens）。
+  function formatGrantUnits(units) {
+    if (!units || units <= 0) return "0";
+    if (units >= 1e8) return trimZero((units / 1e8).toFixed(2)) + "亿 tokens";
+    if (units >= 1e4) return trimZero((units / 1e4).toFixed(1)) + "万 tokens";
+    return Math.round(units) + " tokens";
+  }
+
+  function trimZero(text) {
+    return text.indexOf(".") >= 0 ? text.replace(/0+$/, "").replace(/.$/, "") : text;
+  }
+
+  // setupClaimCaptcha 在页面里渲染阿里云无痕验证控件。
+  //
+  // 先试「无感」验证（startTracelessVerification）：风控判定通过时用户全程无感；
+  // 判定不通过则 SDK 自行弹出滑块，用户拖一次即可。成功后回调给出
+  // captchaVerifyParam，由插件转发给上游。
+  function setupClaimCaptcha(config) {
+    var hint = document.getElementById("claimHint");
+    if (!config.scene_id) {
+      hint.textContent = "上游未下发人机验证参数，无法在页面内完成领取";
+      return;
+    }
+    loadAliyunSdk().then(function () {
+      window.AliyunCaptchaConfig = { region: config.region, prefix: config.prefix };
+      window.initAliyunCaptcha({
+        SceneId: config.scene_id,
+        mode: "popup",
+        language: "zh-CN",
+        showErrorTip: false,
+        element: "#claimCaptcha",
+        button: "#claimCaptchaBtn",
+        getInstance: function (inst) {
+          try {
+            if (inst.startTracelessVerification) inst.startTracelessVerification();
+          } catch (e) { /* 无感入口不可用时退回滑块 */ }
+        },
+        success: function (param) {
+          if (!claimContext) return;
+          claimContext.verifyParam = (typeof param === "string" ? param : (param && param.captchaVerifyParam) || "");
+          claimContext.captcha = config;
+          hint.textContent = "✓ 人机验证已通过，请点击确认领取。";
+          document.getElementById("btnClaimConfirm").disabled = false;
+        },
+        fail: function () {
+          hint.textContent = "未通过无感验证，请按提示完成滑块。";
+        },
+        onError: function () {
+          hint.textContent = "人机验证出错，请重试。";
+        }
+      });
+      hint.textContent = "请完成人机验证（多数情况下无感通过）。";
+    }).catch(function (err) {
+      // CDN 不可达时降级成粘贴：总比让用户无路可走好。
+      hint.textContent = err.message + "，可展开下方粘贴验证码参数。";
+      document.getElementById("claimPasteBox").hidden = false;
+    });
+  }
+
+  // loadAliyunSdk 懒加载阿里云验证码脚本（套餐领取与登录共用）。
+  var aliyunSdkPromise = null;
+  function loadAliyunSdk() {
+    if (typeof window.initAliyunCaptcha === "function") return Promise.resolve();
+    if (aliyunSdkPromise) return aliyunSdkPromise;
+    aliyunSdkPromise = new Promise(function (resolve, reject) {
+      var s = document.createElement("script");
+      s.src = "https://o.alicdn.com/captcha-frontend/aliyunCaptcha/AliyunCaptcha.js";
+      s.onload = function () {
+        if (typeof window.initAliyunCaptcha === "function") { resolve(); return; }
+        aliyunSdkPromise = null;
+        reject(new Error("验证码组件加载异常，请重试"));
+      };
+      s.onerror = function () {
+        aliyunSdkPromise = null;
+        reject(new Error("验证码脚本加载失败"));
+      };
+      document.head.appendChild(s);
+    });
+    return aliyunSdkPromise;
+  }
+
+  // submitClaim 提交领取。
+  function submitClaim() {
+    if (!claimContext) return;
+    var pasted = (document.getElementById("claimVerifyParam").value || "").trim();
+    var param = claimContext.verifyParam || pasted;
+    if (!param) {
+      banner("warn", "请先完成人机验证");
+      return;
+    }
+    var btn = document.getElementById("btnClaimConfirm");
+    btn.disabled = true;
+    btn.textContent = "领取中…";
+    api("POST", "/plans/claim", {
+      account_id: claimContext.account.auth_id || claimContext.account.auth_index,
+      plan_id: claimContext.planId,
+      verify_param: param,
+      verify_region: (claimContext.captcha && claimContext.captcha.region) || ""
+    }).then(function (data) {
+      btn.textContent = "确认领取";
+      btn.disabled = false;
+      if (!data) return;
+      banner(data.ok ? "ok" : "err", data.message || (data.ok ? "领取成功" : "领取失败"));
+      if (!data.ok) return;
+      closeClaimModal();
+      // 领取后的额度与「已领取」状态由插件在同一次刷新里写好，重拉一次即可置灰。
+      loadStatus(true).catch(function () { });
+    }).catch(function (err) {
+      btn.textContent = "确认领取";
+      btn.disabled = false;
+      banner("err", err.message);
+    });
+  }
+
+  // ---- 模型 ----
+
+  var allModels = [];
+

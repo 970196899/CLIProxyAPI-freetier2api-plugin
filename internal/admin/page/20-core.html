@@ -1,0 +1,529 @@
+<script>
+(function () {
+  "use strict";
+  var BASE = "__BASE__";
+  // MGMT 是**本插件**的管理接口前缀。
+  var MGMT = "/v0/management" + BASE;
+  // HOST_MGMT 是**宿主**提供的管理接口前缀（OAuth 登录等）。
+  //
+  // 这两个不能混用：宿主按 "/v0/management/<provider>-auth-url" 从路径里
+  // 提取 provider，若带上插件前缀会得到 "plugins/freetier/workbuddy"，
+  // 校验失败直接 404（页面表现为 "The string did not match the expected pattern."）。
+  var HOST_MGMT = "/v0/management";
+  var stopped = false;
+  // authReady 表示管理密钥已通过探针验证；定时器与首屏加载都以它为门。
+  var authReady = false;
+
+  // ---- 管理密钥的获取 ----
+  //
+  // 本页与 CPA 管理面板（CPAMC）**同源**，所以可以直接复用面板已保存的
+  // 管理密钥，用户不必再输入一遍。面板把整份认证状态存在 localStorage 的
+  // "cli-proxy-auth" 键下（值是可逆的 XOR 混淆，格式见下方 OBF_* 注释），
+  // 明文形如 {"state":{...,"managementKey":"<密钥>",...},"version":N}。
+  //
+  // 注意：面板只在登录时勾选「记住密码」才把 managementKey 写进去——未勾选
+  // 时这个键仍然存在，但没有该字段。因此自动复用是**尽力而为**：读不到就
+  // 退回让用户手填一次（见 revealKeyInput）。
+  var PANEL_STORE_KEY = "cli-proxy-auth";
+  var PANEL_KEY_FIELD = "managementKey";
+  var MANUAL_STORE_KEY = "cpa-management-key";
+  // 混淆格式必须与 CPA 面板逐字节一致（面板侧同一份实现）。这里是格式的
+  // **唯一说明处**，别处只引用，不重复抄写：
+  //
+  //   enc::v1:: + base64( utf8(JSON) XOR utf8(seed|host|userAgent) )
+  //   enc::v2:: + base64( utf8(JSON) XOR utf8(seed|host) )
+  //   seed = "cli-proxy-api-webui::secure-storage"
+  //
+  // CPA 8.0.48 起面板写 v2（派生密钥不再掺 userAgent，浏览器升级后不会解出
+  // 乱码），读取端仍兼容 v1。生态里另有分支面板（如 CPA-Manager-Plus）沿用
+  // v2 前缀但把版本号也掺进派生串（seed|v2|host）：解码后取不到合法密钥时按
+  // 这条再试一次，否则那些用户只会看到「未检测到管理密钥」。
+  //
+  // 派生串由 obfuscationKeys 集中生成，isObfuscated 认整个 enc::vN:: 家族——
+  // 两个判定点必须同源，否则「门禁认、解码不认」会让告警永远走不到。
+  var OBF_PREFIX_RE = /^enc::v(\d+)::/;
+  var OBF_SEED = "cli-proxy-api-webui::secure-storage";
+  var manualKey = "";
+  var keyBusy = false;
+  var keyRetryAfter = 0;
+
+  // obfuscationKeys 列出某个版本可能的派生密钥串，官方口径排在前面。
+  function obfuscationKeys(version) {
+    var official = OBF_SEED + "|" + location.host;
+    if (version === "1") return [official + "|" + navigator.userAgent];
+    return [official, OBF_SEED + "|v" + version + "|" + location.host];
+  }
+
+  // xorDecode 解开 base64 + XOR 的载荷并按 UTF-8 解码。
+  function xorDecode(payload, keyText) {
+    var key = new TextEncoder().encode(keyText);
+    var binary = atob(payload);
+    var bytes = new Uint8Array(binary.length);
+    for (var i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    for (var j = 0; j < bytes.length; j++) bytes[j] ^= key[j % key.length];
+    return new TextDecoder().decode(bytes);
+  }
+
+  // isObfuscated 判断存储值是否为面板的混淆格式（任意版本）。
+  function isObfuscated(raw) {
+    return OBF_PREFIX_RE.test(raw);
+  }
+
+  // deobfuscateAll 返回面板值的全部候选明文，官方口径在前。
+  //
+  // 未知版本返回空数组，并在控制台留一条「请升级插件」的线索：面板再升级换
+  // 格式时，用户至少知道原因，而不是只看到「未检测到管理密钥」。
+  function deobfuscateAll(raw) {
+    var match = OBF_PREFIX_RE.exec(raw || "");
+    if (!match) return [];
+    var version = match[1];
+    if (version !== "1" && version !== "2") {
+      try { console.warn("面板存储格式版本不受支持，请升级本插件：enc::v" + version + "::"); } catch (e) { /* 忽略 */ }
+      return [];
+    }
+    var payload = raw.slice(match[0].length);
+    var texts = [];
+    obfuscationKeys(version).forEach(function (keyText) {
+      try { texts.push(xorDecode(payload, keyText)); } catch (e) { /* 该派生串解不开，试下一个 */ }
+    });
+    return texts;
+  }
+
+  // KEY_RE 限制可接受的密钥字符集：必须是可见 ASCII。
+  //
+  // 为什么必须校验：面板的混淆密钥由 host 与 userAgent 派生，浏览器升级后
+  // userAgent 变化会导致解出乱码（含 U+FFFD 替换字符）。把这种乱码塞进
+  // Authorization 头会让浏览器直接拒绝请求——Safari 报的正是
+  // "The string did not match the expected pattern."，在别处极难定位。
+  var KEY_RE = /^[\x21-\x7E]+$/;
+
+  // normalizeKeyValue 把存储值归一成裸密钥串；不是有效密钥时返回空。
+  function normalizeKeyValue(raw) {
+    if (!raw) return "";
+    var text = String(raw).trim();
+    if (isObfuscated(text)) return "";                    // 混淆串，交给 deobfuscateAll
+    if (text === "null" || text === "undefined") return "";
+    // 面板用 JSON.stringify 存，因此值可能带引号。
+    if (text.length > 1 && text.charAt(0) === '"' && text.charAt(text.length - 1) === '"') {
+      try { text = JSON.parse(text); } catch (e) { /* 保留原值 */ }
+    }
+    if (typeof text !== "string") return "";
+    text = text.trim();
+    if (text === "" || text === "null" || text === "undefined") return "";
+    // 只接受可见 ASCII：含替换字符/控制符/非 ASCII 说明解码失败或值不合法。
+    if (!KEY_RE.test(text)) return "";
+    return text;
+  }
+
+  // snapshotKey 从一份快照明文里取管理密钥；解析不出合法密钥时返回空串。
+  function snapshotKey(text) {
+    var snapshot = null;
+    try { snapshot = JSON.parse(text); } catch (e) { return ""; }
+    if (!snapshot || typeof snapshot !== "object") return "";
+    // zustand persist 的落盘格式是 {state:{...},version:N}，也兼容直接存 state。
+    var state = (snapshot.state && typeof snapshot.state === "object") ? snapshot.state : snapshot;
+    return normalizeKeyValue(state[PANEL_KEY_FIELD]);
+  }
+
+  // panelAuthKey 从面板的持久化快照里取出管理密钥（格式见上方 OBF_* 注释）。
+  //
+  // 面板未勾选「记住密码」时快照里没有 managementKey 字段，这里返回空串。
+  function panelAuthKey() {
+    var raw = "";
+    try { raw = localStorage.getItem(PANEL_STORE_KEY) || ""; } catch (e) { return ""; }
+    if (!raw) return "";
+    var texts = isObfuscated(raw) ? deobfuscateAll(raw) : [raw];
+    for (var i = 0; i < texts.length; i++) {
+      var key = snapshotKey(texts[i]);
+      if (key) return key;
+    }
+    return "";
+  }
+
+  // managementKey 返回当前生效的管理密钥。
+  //
+  // 优先级：本页刚手输的值 → 面板快照 → 本标签页早前手输并**验证过**的值。
+  // 返回空串表示没有任何可用密钥，此时 api() 不会发出任何请求。
+  function managementKey() {
+    if (manualKey) return manualKey;
+    var fromPanel = panelAuthKey();
+    if (fromPanel) return fromPanel;
+    try { return normalizeKeyValue(sessionStorage.getItem(MANUAL_STORE_KEY)); }
+    catch (e) { return ""; }
+  }
+
+  var bannerTimer = null;
+
+  function banner(kind, text, duration) {
+    if (bannerTimer) { clearTimeout(bannerTimer); bannerTimer = null; }
+    var el = document.getElementById("banner");
+    if (!el) return;
+    // 默认自动消失时间：ok 5秒，warn 6秒，err 8秒。若传入 0 则持续显示直到被下一次操作替换或手动清除
+    var timeout = duration !== undefined ? duration : (kind === "ok" ? 5000 : (kind === "warn" ? 6000 : 8000));
+    el.className = "banner show " + kind + (timeout > 0 ? "" : " persist");
+    el.textContent = text;
+    if (timeout <= 0) {
+      // 常驻横幅没有超时兜底，必须能被手动关掉。
+      var close = document.createElement("button");
+      close.type = "button";
+      close.className = "banner-close";
+      close.setAttribute("aria-label", "关闭提示");
+      close.title = "关闭提示";
+      close.textContent = "×";
+      close.addEventListener("click", clearBanner);
+      el.appendChild(close);
+    }
+    if (timeout > 0) {
+      bannerTimer = setTimeout(function () {
+        clearBanner();
+      }, timeout);
+    }
+  }
+
+  function clearBanner() {
+    if (bannerTimer) { clearTimeout(bannerTimer); bannerTimer = null; }
+    var el = document.getElementById("banner");
+    if (el) el.className = "banner";
+  }
+
+  // haltOnAuthFailure 判定密钥失效：立即停止一切自动请求并展开手填框。
+  //
+  // CPA 按 IP 统计管理密钥失败次数，5 次封禁 30 分钟；未携带密钥也计数，且
+  // 封禁作用于整个 /v0/management（即整个后台）。所以必须一次失败就停。
+  function haltOnAuthFailure(status) {
+    if (status !== 401 && status !== 403) return false;
+    stopped = true;
+    authReady = false;
+    stopLoginPolling();
+    revealKeyInput();
+    setKeyStatus("管理密钥无效或缺失（HTTP " + status + "）");
+    banner("err", "管理密钥无效或缺失（HTTP " + status + "）。已停止全部自动请求，避免触发 CPA 的 IP 封禁。"
+      + "若面板勾选了「记住密码」，本页会自动复用；未勾选请在上方填入一次。");
+    return true;
+  }
+
+  // revealKeyInput 展开密钥输入框（自动复用失败时的手动兜底）；此时不发任何请求。
+  function revealKeyInput() {
+    var box = document.getElementById("keyBox");
+    if (box) box.hidden = false;
+  }
+
+  function setKeyStatus(text) {
+    var el = document.getElementById("keyStatus");
+    if (el) el.textContent = text;
+  }
+
+  // hostPath 标记该路径是宿主的根级管理接口（不拼插件前缀）。
+  // 用一个前缀标记而不是改 api() 签名，调用点读起来更直白。
+  var HOST_PREFIX = "@host";
+  function hostPath(path) { return HOST_PREFIX + path; }
+
+  // API_TIMEOUT_MS 是普通管理接口的客户端超时。
+  //
+  // 没有超时的后果不是「慢」，而是「假死」：请求挂住时调用方永远停在
+  // 「查询中…」，页面既不报错也不重试，用户只能刷新。分成两档是因为额度
+  // 批量那条本来就要几十秒（后端一轮最长三分钟），用普通档会把正常请求
+  // 掐掉。
+  var API_TIMEOUT_MS = 60000;
+  var API_SLOW_TIMEOUT_MS = 240000;
+
+  function api(method, path, body, options) {
+    // 闸门：身份未确认（或已判定失效）时绝不发请求。
+    //
+    // CPA 把「未携带管理密钥」也计为一次失败，5 次即封禁 30 分钟，且封的是
+    // 整个 /v0/management——页面多发一个请求都是在拿整个后台冒险。
+    if (stopped) return Promise.resolve(null);
+    var key = managementKey();
+    if (!key) return Promise.resolve(null);
+    var headers = { "Content-Type": "application/json" };
+    headers["Authorization"] = "Bearer " + key;
+    var url = path.indexOf(HOST_PREFIX) === 0
+      ? HOST_MGMT + path.slice(HOST_PREFIX.length)
+      : MGMT + path;
+    var timeout = (options && options.timeout) || API_TIMEOUT_MS;
+    var controller = null;
+    var timer = null;
+    var init = {
+      method: method,
+      headers: headers,
+      body: body ? JSON.stringify(body) : undefined
+    };
+    // 老浏览器（或非浏览器环境）没有 AbortController：退化成「没有超时」，
+    // 与改动前行为一致，不会因为能力缺失把请求发不出去。
+    if (typeof AbortController === "function") {
+      controller = new AbortController();
+      init.signal = controller.signal;
+      timer = setTimeout(function () { controller.abort(); }, timeout);
+    }
+    var request = fetch(url, init).then(function (resp) {
+      if (haltOnAuthFailure(resp.status)) return null;
+      // 先取文本再解析：宿主对**未注册**的管理路由直接回 404 空体，
+      // resp.json() 会抛 "Unexpected end of JSON input" —— 那个报错完全
+      // 指不到真正原因。这里把空体/非 JSON 都翻成人能看懂的一句话。
+      return resp.text().then(function (raw) {
+        var data = null;
+        if (raw) {
+          try {
+            data = JSON.parse(raw);
+          } catch (parseErr) {
+            var bad = new Error("接口返回的不是 JSON（HTTP " + resp.status + "）");
+            bad.status = resp.status;
+            throw bad;
+          }
+        }
+        if (!resp.ok) {
+          var msg = (data && data.error) ? data.error : ("HTTP " + resp.status);
+          var failure = new Error(msg);
+          // 把状态码带出去：调用方要按 409 / 400 分流，而不是匹配中文文案。
+          failure.status = resp.status;
+          throw failure;
+        }
+        if (data === null) {
+          var empty = new Error("接口没有返回内容（HTTP " + resp.status + "）：该管理路由可能未在插件里注册");
+          empty.status = resp.status;
+          throw empty;
+        }
+        // 宿主把插件的响应体**原样**透传给浏览器（{ok, result} 那层信封是
+        // 插件与宿主之间的 RPC 格式，不会到达这里）。因此直接返回 body，
+        // 不能再剥一层 "result"——那会把业务字段全部丢掉。
+        return data;
+      });
+    });
+    // 超时/中断统一在这里翻译成可读错误：fetch 抛的是 AbortError，
+    // 直接冒到调用方只会显示 "The user aborted a request."，指不到是哪条接口。
+    return request.then(function (data) {
+      if (timer) { clearTimeout(timer); timer = null; }
+      return data;
+    }, function (err) {
+      if (timer) { clearTimeout(timer); timer = null; }
+      if (err && (err.name === "AbortError" || err.code === 20)) {
+        var timeoutError = new Error("请求超时（" + Math.round(timeout / 1000) + " 秒）：" + method + " " + path);
+        timeoutError.status = 0;
+        timeoutError.timeout = true;
+        throw timeoutError;
+      }
+      throw err;
+    });
+  }
+
+  // identity 是行内编辑器的默认归一函数：原样返回输入。
+  function identity(value) { return value; }
+
+  function el(tag, text, className) {
+    var node = document.createElement(tag);
+    if (text !== undefined && text !== null) node.textContent = String(text);
+    if (className) node.className = className;
+    return node;
+  }
+
+  function pill(text, kind) {
+    return el("span", text, "pill" + (kind ? " " + kind : ""));
+  }
+
+  // shortReason 把上游错误正文压成一行：额度格只有一列宽，完整原因放 title。
+  function shortReason(text) {
+    var flat = String(text || "").replace(/\s+/g, " ").trim();
+    return flat.length > 42 ? flat.slice(0, 42) + "…" : flat;
+  }
+
+  // pendingQuota 取「已领取、尚未生效」的额度（后端 metric key = pending）。
+  //
+  // 上游在授予生效前不建额度桶，所以这部分不会出现在 remain / total 里；
+  // 不单独显示，用户领到的几亿在页面上就没有任何痕迹。
+  function pendingQuota(quota) {
+    var metrics = (quota && quota.metrics) || [];
+    for (var i = 0; i < metrics.length; i++) {
+      if (metrics[i] && metrics[i].key === "pending") return metrics[i].value;
+    }
+    return 0;
+  }
+
+  // vendorChipClass 把供应商标识哈希到 v0..v5，交给 CSS 上彩色芯片底色。
+  // 优先用 vendor_id：展示名可以改，用名字哈希会让芯片颜色跟着变。
+  function vendorChipClass(vendorID, label) {
+    var key = String(vendorID || label || "");
+    var h = 0;
+    for (var i = 0; i < key.length; i++) h = (h * 31 + key.charCodeAt(i)) >>> 0;
+    return "v" + (h % 6);
+  }
+
+  // cellWith 把节点包进一个 td（表格里 appendChild 更顺手）。
+  function cellWith(node) {
+    var td = el("td");
+    td.appendChild(node);
+    return td;
+  }
+
+  function setText(id, text) {
+    var node = document.getElementById(id);
+    if (node) node.textContent = text === undefined || text === null ? "" : String(text);
+  }
+
+  // editableCell 渲染「文字 + ✎」的行内编辑单元格，模型 ID 与账号别名共用。
+  //
+  // 点击文字/铅笔，或聚焦后按回车/空格进入编辑：回车/失焦保存，Esc 取消。
+  // 保存空串表示清除，展示态回到 opts.fallback()。交互、键盘处理与样式只有
+  // 这一份实现，调用点只提供「显示什么」与「怎么存」。
+  //
+  // opts:
+  //   saved       当前已保存的值（空 = 未设置）
+  //   fallback()  未设置时的展示文本（存成函数：保存后要立刻反映最新值）
+  //   prefill()   编辑框预填值（已保存时一律用 saved）
+  //   placeholder 预填为空时的提示
+  //   mono        展示文本是否用等宽字体
+  //   normalize(next) 把输入映射成真正落库的值；返回空串表示清除
+  //   title(saved) 展示态悬浮提示
+  //   save(next)  保存；返回 Promise，解析出 false 表示未保存（静默回退），
+  //               reject 表示保存失败（横幅提示 + 回退）
+  function editableCell(opts) {
+    var cell = el("td");
+    var saved = opts.saved || "";
+    var normalize = opts.normalize || identity;
+    var wrap = el("span", null, "editable");
+    wrap.setAttribute("role", "button");
+    wrap.setAttribute("tabindex", "0");
+    var nameSpan = el("span", null, opts.mono ? "editablename mono" : "editablename");
+    var pencil = el("span", "✎", "editableedit");
+    pencil.setAttribute("aria-hidden", "true");
+    wrap.appendChild(nameSpan);
+    wrap.appendChild(pencil);
+    cell.appendChild(wrap);
+    syncName();
+
+    function syncName() {
+      nameSpan.textContent = saved || opts.fallback();
+      wrap.setAttribute("title", opts.title(saved));
+    }
+
+    function restore(focusBack) {
+      cell.textContent = "";
+      syncName();
+      cell.appendChild(wrap);
+      if (focusBack) wrap.focus();
+    }
+
+    function beginEdit() {
+      // 预填「当前生效值」省去重敲；未设置时用 opts.prefill()。
+      var initial = saved || opts.prefill();
+      var input = document.createElement("input");
+      input.type = "text";
+      input.className = "aliasinput";
+      input.value = initial;
+      input.placeholder = opts.placeholder || "";
+      var done = false;
+
+      // finish 提交并回到展示态。focusBack 只在键盘结束时置真，
+      // 失焦提交不抢焦点，避免把用户刚点到的元素顶掉。
+      function finish(commit, focusBack) {
+        if (done) return;
+        done = true;
+        // 归一先于比较：opts.normalize 定义「这个值实际意味着什么」（留空清除、
+        // 填回原名等同清除），调用点不必各自判重。
+        var next = normalize(commit ? (input.value || "").trim() : saved);
+        // 没改就不落库：等于当前值，或等于归一后的预填值（预填是「当前生效值」，
+        // 原样提交不该变成一条新记录）。
+        if (!commit || next === saved || next === normalize(initial)) { restore(focusBack); return; }
+        input.disabled = true;
+        opts.save(next).then(function (ok) {
+          if (ok === false) { restore(focusBack); return; }
+          saved = next;
+          restore(focusBack);
+        }).catch(function (err) {
+          // 保存失败：回到原值并提示（错误是需要用户知晓的，成功则静默）。
+          banner("err", err.message);
+          restore(focusBack);
+        });
+      }
+
+      input.addEventListener("keydown", function (ev) {
+        if (ev.key === "Enter") { ev.preventDefault(); finish(true, true); }
+        else if (ev.key === "Escape") { ev.preventDefault(); finish(false, true); }
+      });
+      input.addEventListener("blur", function () { finish(true, false); });
+
+      cell.textContent = "";
+      cell.appendChild(input);
+      input.focus();
+      // 光标放开头而非全选：预填是为了补前缀，全选会被第一次按键整体覆盖。
+      input.setSelectionRange(0, 0);
+    }
+
+    wrap.addEventListener("click", beginEdit);
+    wrap.addEventListener("keydown", function (ev) {
+      if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); beginEdit(); }
+    });
+    return cell;
+  }
+
+  // ---- 供应商表 ----
+  //
+  // 页面不硬编码供应商名：全部来自后端的 /vendors。这样新增供应商
+  // 不需要改 HTML，也不会出现「后端有、页面认不出」的错配。
+  var vendorsById = {};
+  var vendorsLoaded = false;
+
+  function loadVendors() {
+    return api("GET", "/vendors").then(function (data) {
+      var list = (data && data.vendors) || [];
+      vendorsById = {};
+      var menu = document.getElementById("addVendorMenu");
+      if (menu) menu.textContent = "";
+      list.forEach(function (vendor) {
+        vendorsById[vendor.id] = vendor;
+        if (!menu) return;
+        // 每一项就是「用这个供应商添加账号」的入口：点一下直接开始登录，
+        // 不再需要先选中再点按钮（两步变一步）。
+        var item = document.createElement("button");
+        item.type = "button";
+        item.textContent = vendor.name;
+        item.addEventListener("click", function () {
+          closeVendorMenu();
+          startVendorAdd(vendor);
+        });
+        menu.appendChild(item);
+      });
+      vendorsLoaded = true;
+      return list;
+    }).catch(function (err) {
+      // 供应商列表拉不到不该让整页失效：账号表退化成显示原始 id。
+      return [];
+    });
+  }
+
+  // liftMenuCard 在菜单展开时把所在卡片抬到后续卡片之上。
+  //
+  // 卡片本身不是层叠上下文，但菜单是绝对定位 + z-index:20，跨卡片溢出时
+  // 会被后续卡片的内容盖住；抬升所在卡片保证菜单完整可见。
+  function liftMenuCard(menu, open) {
+    var card = menu && menu.closest ? menu.closest(".card") : null;
+    if (card) card.classList.toggle("menu-open", !!open);
+  }
+
+  // closeVendorMenu 收起供应商下拉。
+  function closeVendorMenu() {
+    var menu = document.getElementById("addVendorMenu");
+    if (!menu) return;
+    menu.hidden = true;
+    liftMenuCard(menu, false);
+  }
+
+  // toggleVendorMenu 展开/收起供应商下拉。
+  function toggleVendorMenu() {
+    var menu = document.getElementById("addVendorMenu");
+    if (!menu) return;
+    if (menu.hidden && !menu.childElementCount) {
+      banner("warn", "没有可用的供应商，请检查插件配置的 enabled_realms。");
+      return;
+    }
+    menu.hidden = !menu.hidden;
+    liftMenuCard(menu, !menu.hidden);
+  }
+
+  // vendorLabel 返回供应商展示名；未知 id 时退回 id 本身。
+  function vendorLabel(vendorID, realm) {
+    if (vendorID && vendorsById[vendorID]) return vendorsById[vendorID].name;
+    if (vendorID) return vendorID;
+    // 旧数据可能只有 realm：拼一个可读的回退名。
+    return realm === "global" ? "global" : "cn";
+  }
+

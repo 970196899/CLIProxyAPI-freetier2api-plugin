@@ -740,10 +740,16 @@ func (c *Catalog) ApplyAliases(vendorID string, models []pluginapi.ModelInfo) []
 		manual := c.aliases[prefix+bare]
 		tagged := c.taggedModelID(vendorID, bare)
 		switch {
-		case manual != "":
+		// 手动别名与同渠道**其它模型**的官方 ID 撞车时放弃改名（第二分支）：
+		// 保存时已经拦过一次，这里兜的是「别名先存、清单后变」——上游新增了
+		// 一个与旧别名同名的模型。宁可这个模型暂时没别名，也不能让它把另一个
+		// 模型的路由挤掉。
+		case manual != "" && (strings.EqualFold(manual, bare) || !present[strings.ToLower(manual)]):
 			model.ID = manual
 			model.Name = manual
 			model.DisplayName = manual
+		case manual != "":
+			logger.Info("模型：%s 的别名 %q 与同渠道其它模型 ID 撞车，本次不生效", bare, manual)
 		case tagged != "" && !present[strings.ToLower(tagged)]:
 			// 自动渠道标识不覆盖：手动别名优先；tag 后的名字撞上**同供应商
 			// 清单里的其他模型**时放弃标识（防路由歧义；跨供应商本就不合并）。
@@ -826,6 +832,44 @@ func (c *Catalog) untagModelID(vendorID, requested string) []string {
 //
 // 同一供应商内别名唯一：写入时清掉占用同名别名的旧模型，否则反查会命中两条。
 // 落盘时顺带把旧前缀键改写成现役键，旧配置自然迁移，不会留下清不掉的残留。
+// AliasConflicts 报告 alias 是否与**同渠道其它模型**的对外 ID 撞车，返回撞上的那个 ID。
+//
+// 为什么必须拦：别名在 ApplyAliases 里是**无条件覆盖** model.ID 的，而
+// ResolveOutboundModel 解析请求时又先查别名表、命中就直接还原成 bare。于是
+// 「把 A 的别名设成 B 的官方 ID」会让客户端请求 B 时被转发到 A 的上游模型，
+// B 在清单里还挂着却永远不可达——正是渠道标识要消除的那种歧义。
+//
+// 比对范围含两类对外 ID：
+//   - 其它模型的官方 ID（cached 里存的就是未过滤、未换别名的原始清单）；
+//   - 其它模型自动渠道标识后的名字（vendor-model）。
+//
+// 目标模型自身（bare 及其当前别名）不算冲突，否则重复保存同一个别名会被自己挡住。
+func (c *Catalog) AliasConflicts(vendorID, bare, alias string) string {
+	vendorID = strings.TrimSpace(vendorID)
+	bare = strings.TrimSpace(bare)
+	alias = strings.TrimSpace(alias)
+	if vendorID == "" || bare == "" || alias == "" {
+		return ""
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	currentAlias := strings.TrimSpace(c.aliases[aliasScopedKey(vendorID, bare)])
+	for _, model := range c.cached[vendorID].models {
+		id := strings.TrimSpace(model.ID)
+		if id == "" {
+			continue
+		}
+		// 目标模型自己：官方 ID 与它现在的别名都跳过。
+		if strings.EqualFold(id, bare) || (currentAlias != "" && strings.EqualFold(id, currentAlias)) {
+			continue
+		}
+		if strings.EqualFold(id, alias) || strings.EqualFold(c.taggedModelID(vendorID, id), alias) {
+			return id
+		}
+	}
+	return ""
+}
+
 func (c *Catalog) SetAlias(vendorID, bare, alias string) {
 	if c.store == nil {
 		return

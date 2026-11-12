@@ -114,8 +114,13 @@ type State struct {
 	// nil = 未设置，回落配置默认值。
 	AutoRaccoonDailyGrant *bool `json:"auto_raccoon_daily_grant,omitempty"`
 	// TaskSchedules 是按任务族保存的整点小时列表（0-23）。
-	// 新代码只读写这个字段；下面五个字段仅用于读取旧状态并迁移。
+	// 与 TaskScheduleMinutes 并存：整点是存量语义，分钟是精确排程。两者同时
+	// 存在时**分钟优先**（见 tasks.EffectiveScheduleMinutes）。
+	// 下面五个字段仅用于读取旧状态并迁移。
 	TaskSchedules map[string][]int `json:"task_schedules,omitempty"`
+	// TaskScheduleMinutes 是按任务族保存的精确排程（当天分钟数 0-1439）。
+	// 只在用户显式设置分钟级排程时写入；为空表示沿用整点列表。
+	TaskScheduleMinutes map[string][]int `json:"task_schedule_minutes,omitempty"`
 
 	// Deprecated: 旧版固定字段，仅用于迁移读取。
 	CheckinHours   []int `json:"checkin_hours,omitempty"`
@@ -242,6 +247,9 @@ func normalize(state *State) {
 	if state.TaskSchedules == nil {
 		state.TaskSchedules = map[string][]int{}
 	}
+	if state.TaskScheduleMinutes == nil {
+		state.TaskScheduleMinutes = map[string][]int{}
+	}
 	for kind, hours := range map[string][]int{
 		"checkin":   state.CheckinHours,
 		"travel":    state.TravelHours,
@@ -301,6 +309,10 @@ func clone(state *State) State {
 	out.TaskSchedules = make(map[string][]int, len(state.TaskSchedules))
 	for kind, hours := range state.TaskSchedules {
 		out.TaskSchedules[kind] = append([]int(nil), hours...)
+	}
+	out.TaskScheduleMinutes = make(map[string][]int, len(state.TaskScheduleMinutes))
+	for kind, minutes := range state.TaskScheduleMinutes {
+		out.TaskScheduleMinutes[kind] = append([]int(nil), minutes...)
 	}
 	out.CheckinHours = nil
 	out.TravelHours = nil

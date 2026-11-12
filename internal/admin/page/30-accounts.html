@@ -1,0 +1,519 @@
+  // ---- 账号视图 ----
+
+  // lastStatus 是最近一次 /status 的响应，供重渲染账号表使用。
+  //
+  // **额度不在这里再存一份**：/status 的 accounts[].quota 是后端缓存的权威值，
+  // 页面另存一份会让两套键逐渐分叉（后端按账号身份，页面得靠候选键猜测）。
+  var lastStatus = null;
+
+  // maskAccount 对 API key 类账号做脱敏：保留前四位与后四位，中间用 *** 代替。
+  //
+  // 为什么只对 apikey 类脱敏：OAuth / 设备令牌账号展示的是昵称或邮箱（本就不
+  // 敏感），而 API key 本身就是凭证——页面是明文 HTML，把完整 key 渲染进去
+  // 等于把它写进浏览器缓存、截图和录屏里。太短的 key（≤8 位）全遮，因为
+  // 露出前后四位等于露出全部。
+  function maskAccount(value) {
+    var text = String(value === undefined || value === null ? "" : value);
+    if (text.length <= 8) return text ? "***" : "";
+    return text.slice(0, 4) + "***" + text.slice(-4);
+  }
+
+  // accountOriginalName 是账号在上游的原始名称（未设别名时展示的文本），
+  // 名称未知时返回空串，由调用方决定怎么占位。
+  //
+  // 取后端的 native_label 而不是 label：label 在设了别名后就是别名本身，
+  // 拿它比较会让「填回原名」永远判不出来。
+  // API key 类账号的 label 就是 key 本身（添加时用户没给昵称），必须脱敏；
+  // 因此编辑框预填的也是脱敏后的文本，而不是把明文 key 放进页面 DOM。
+  // 其余账号显示昵称/邮箱。
+  function accountOriginalName(account) {
+    var native = account.native_label || "";
+    var vendor = vendorsById[account.vendor_id];
+    if (vendor && vendor.auth_mode === "apikey") {
+      return maskAccount(native || account.auth_id || "");
+    }
+    return native || account.auth_id || "";
+  }
+
+  // accountDisplay 决定一个账号在表里显示什么：别名优先，未设置时用上游名称。
+  //
+  // 别名是用户自己起的名字，不是凭证，原样显示、不做脱敏。这里直接取 alias
+  // 而不是 label：改完别名后页面不重新拉 /status 也要立刻显示新名字，且清除
+  // 别名时 label 仍是上游名称，无需页面自己记住"原来的名字"。
+  function accountDisplay(account) {
+    return account.alias || accountOriginalName(account) || "-";
+  }
+
+  // accountNameCell 渲染「账号名 + ✎」行内编辑，交互复用模型 ID 那一套
+  // （editableCell），别名按账号身份（file_id）保存到 /accounts/alias。
+  //
+  // 编辑框预填当前生效的名称（已设别名取别名，否则取上游名称），与模型别名
+  // 一致，省去重敲。留空、或填回原名称，都视为「不要别名」：把上游名称原样
+  // 存成别名只会多一份永不随上游变化的副本，还让「是否设置过别名」失去意义，
+  // 因此 normalize 一律把它们归一成空串（清除记录）。
+  // 没有 file_id 的账号（非文件来源）不可编辑。
+  function accountNameCell(account) {
+    if (!account.file_id) return el("td", accountDisplay(account));
+    return editableCell({
+      saved: account.alias || "",
+      fallback: function () { return accountDisplay(account); },
+      prefill: function () { return accountOriginalName(account); },
+      placeholder: "留空使用上游名称",
+      normalize: function (next) { return next === accountOriginalName(account) ? "" : next; },
+      title: function (saved) {
+        return saved
+          ? "点击编辑账号别名（留空或与原名称相同则清除）"
+          : "点击设置账号别名（留空或与原名称相同则不设置）";
+      },
+      save: function (next) {
+        return api("POST", "/accounts/alias", { file_id: account.file_id, alias: next }).then(function (data) {
+          if (!data) return false;
+          account.alias = next;
+          return next;
+        });
+      }
+    });
+  }
+
+  // accountKey 返回账号在勾选与批量操作里的标识。
+  //
+  // 用 auth_id（宿主 entry.ID / Name）而不是 file_id：批量端点与删除端点在
+  // 宿主侧按 ID / Name / AuthIndex 匹配，auth_id 是页面能拿到的、始终存在的那个。
+  function accountKey(account) {
+    return String(account.auth_id || account.auth_index || account.file_id || "");
+  }
+
+  // selectedAccounts 记录勾选的账号（键为 auth_id）。
+  //
+  // 账号表每次动作后都会重渲染，勾选状态因此存在这里而不是只留在 DOM 上：
+  // 连续执行「禁用选中 → 删除」这类批量流程时不必重新勾选。
+  var selectedAccounts = {};
+
+  function accountCheckCell(account) {
+    var key = accountKey(account);
+    var cell = el("td");
+    var checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.checked = !!selectedAccounts[key];
+    checkbox.setAttribute("data-account-id", key);
+    checkbox.addEventListener("change", function () {
+      if (checkbox.checked) selectedAccounts[key] = true;
+      else delete selectedAccounts[key];
+      syncAccountSelection();
+    });
+    cell.appendChild(checkbox);
+    return cell;
+  }
+
+  // selectedAccountIDs 取当前勾选的账号（用于批量操作）。
+  function selectedAccountIDs() {
+    return Object.keys(selectedAccounts);
+  }
+
+  // syncAccountSelection 在勾选变化后同步按钮可用态。
+  //
+  // 删除是破坏性操作，没有勾选时禁用；其余批量按钮允许「不勾选 = 全部账号」，
+  // 因此始终可用。
+  function syncAccountSelection() {
+    var count = selectedAccountIDs().length;
+    var delBtn = document.getElementById("btnDeleteAccounts");
+    if (delBtn) {
+      delBtn.disabled = count === 0;
+      if (count === 0) { delBtn.textContent = "删除"; deleteArmed = false; }
+      else if (!deleteArmed) delBtn.textContent = "删除（" + count + "）";
+    }
+  }
+
+  // setAllAccountsSelected 勾选/取消**当前可见**的账号（与模型表的全选同一语义）。
+  //
+  // 被筛选隐藏的行不动它们的勾选：筛选只决定看得见哪些行，不该顺手改掉
+  // 看不见的账号的选中状态。
+  function setAllAccountsSelected(selected) {
+    Array.prototype.forEach.call(
+      document.querySelectorAll("#accounts input[type=checkbox][data-account-id]"),
+      function (box) {
+        box.checked = selected;
+        var key = box.getAttribute("data-account-id");
+        if (selected) selectedAccounts[key] = true;
+        else delete selectedAccounts[key];
+      });
+    syncAccountSelection();
+  }
+
+  // checkinStatusPill 把签到历史的状态映射成胶囊：成功（绿）/ 已签到（中性）/ 失败（红）。
+  //
+  // 后端只给 success / already / error 三种状态。NotRecorded（上游窗口未开启、
+  // 领取被拒）也被归为 error：它同样「本次没领到」，不能显示成成功。
+  function checkinStatusPill(status) {
+    if (status === "success") return pill("成功", "ok");
+    if (status === "already") return pill("已签到");
+    return pill("失败", "err");
+  }
+
+  // buildCheckinHistoryRow 构造可展开的签到历史行（后端已按新→旧排好序）。
+  //
+  // 每次「什么时候、以什么状态、为什么失败」都由后端历史提供：失败明细过去
+  // 只活在几秒钟的横幅里，事后完全无从追溯。
+  function buildCheckinHistoryRow(history) {
+    var tr = el("tr");
+    tr.hidden = true;
+    var cell = el("td");
+    cell.colSpan = 8;
+    // 说明文字可能很长（上游报错原文），不跟随表格的 nowrap。
+    cell.style.whiteSpace = "normal";
+    history.forEach(function (entry) {
+      var line = el("div", null, "hint");
+      line.appendChild(el("span", entry.run_at ? new Date(entry.run_at).toLocaleString() : "-"));
+      line.appendChild(document.createTextNode("  "));
+      line.appendChild(checkinStatusPill(entry.status));
+      line.appendChild(el("span", entry.trigger === "schedule" ? "  定时" : "  手动", "muted"));
+      if (entry.message) line.appendChild(el("span", "  " + entry.message));
+      if (entry.credit) line.appendChild(el("span", "  +" + entry.credit, "muted"));
+      cell.appendChild(line);
+    });
+    tr.appendChild(cell);
+    return tr;
+  }
+
+  // accountMatchesFilter 判断账号是否命中筛选框。
+  //
+  // 只匹配页面上看得到的那些字段（供应商、账号名、别名、身份标识），不匹配
+  // token 一类的凭证内容：筛选是为了找人，不是为了翻凭证。
+  function accountMatchesFilter(account, filter) {
+    if (!filter) return true;
+    var vendor = vendorLabel(account.vendor_id, account.realm);
+    var text = [
+      String(account.auth_id || ""),
+      String(account.file_id || ""),
+      String(account.alias || ""),
+      String(account.native_label || ""),
+      vendor
+    ].join(" ").toLowerCase();
+    return text.indexOf(filter) >= 0;
+  }
+
+  function renderAccounts(status) {
+    var host = document.getElementById("accounts");
+    host.textContent = "";
+    var accounts = (status && status.accounts) || [];
+    // 勾选集合按**全部账号**对齐，而不是筛选后的视图：把账号筛掉只是不显示，
+    // 不该静默取消勾选（否则「筛一批 → 全选 → 清空筛选 → 执行」会漏目标）。
+    var present = {};
+    accounts.forEach(function (account) { present[accountKey(account)] = true; });
+    Object.keys(selectedAccounts).forEach(function (key) {
+      if (!present[key]) delete selectedAccounts[key];
+    });
+
+    var filter = (document.getElementById("accountFilter").value || "").trim().toLowerCase();
+    var visible = accounts.filter(function (account) { return accountMatchesFilter(account, filter); });
+    setText("accountCount", accounts.length
+      ? "（" + (filter ? visible.length + " / " + accounts.length : accounts.length) + " 个）"
+      : "");
+    if (!accounts.length) {
+      syncAccountSelection();
+      host.appendChild(el("div", "没有账号。请在 CPA 面板的「添加认证」里选择 FreeTier 2API，或在控制台页发起登录。", "muted"));
+      return;
+    }
+    if (!visible.length) {
+      syncAccountSelection();
+      host.appendChild(el("div", "没有匹配「" + filter + "」的账号。", "muted"));
+      return;
+    }
+    // 排序：状态 + 供应商名称 + 账号 ID（启用在上，停用在下；同状态内按 供应商名称 + 账号 ID 升序）
+    visible.sort(function (a, b) {
+      var statusA = a.disabled ? 1 : 0;
+      var statusB = b.disabled ? 1 : 0;
+      if (statusA !== statusB) {
+        return statusA - statusB;
+      }
+      var vendorA = vendorLabel(a.vendor_id, a.realm);
+      var vendorB = vendorLabel(b.vendor_id, b.realm);
+      if (vendorA !== vendorB) {
+        return vendorA < vendorB ? -1 : 1;
+      }
+      var idA = String(a.auth_id || a.label || "").toLowerCase();
+      var idB = String(b.auth_id || b.label || "").toLowerCase();
+      if (idA !== idB) {
+        return idA < idB ? -1 : 1;
+      }
+      return 0;
+    });
+
+    var table = el("table");
+    var head = el("tr");
+    ["", "状态", "供应商", "账号", "签到", "剩余 / 总额", "剩余率", "刷新时间"]
+      .forEach(function (name) { head.appendChild(el("th", name)); });
+    table.appendChild(head);
+
+    visible.forEach(function (account) {
+      var row = el("tr");
+      // historyRow 是该账号的展开行（无历史或未展开时为 null / hidden）。
+      var historyRow = null;
+      row.appendChild(accountCheckCell(account));
+      row.appendChild(cellWith(account.disabled ? pill("停用", "err") : pill("启用", "ok")));
+
+      var vendor = vendorLabel(account.vendor_id, account.realm);
+      var vendorCell = el("td");
+      vendorCell.appendChild(pill(vendor, vendorChipClass(account.vendor_id, vendor)));
+      row.appendChild(vendorCell);
+
+      row.appendChild(accountNameCell(account));
+
+      // 签到 / 套餐领取列：支持领取的供应商（如 ZCode）展示套餐领取按钮；其余展示签到或「无签到活动」
+      var claimSpec = claimButtonSpec(account);
+      if (claimSpec) {
+        var claimCell = el("td");
+        var claimBtn = el("button", claimSpec.text, "act" + (claimSpec.disabled ? "" : " primary"));
+        claimBtn.type = "button";
+        claimBtn.disabled = claimSpec.disabled;
+        claimBtn.title = claimSpec.title || "";
+        claimBtn.addEventListener("click", function () { openClaimModal(account); });
+        claimCell.appendChild(claimBtn);
+        row.appendChild(claimCell);
+      } else {
+        var checkin = account.checkin || {};
+        var supportsCheckin = account.supports_checkin;
+        if (supportsCheckin === undefined) {
+          var v = vendorsById[account.vendor_id];
+          supportsCheckin = v ? v.supports_checkin : (account.realm !== "global");
+        }
+        if (!supportsCheckin) {
+          row.appendChild(el("td", "无签到活动", "muted"));
+        } else {
+          // 今日待复核由后端判定并下发布尔值，前端不自己拼。
+          //
+          // 曾经在前端用「last_date 为空 && provisional_date 是今天」判断，
+          // 但 last_date 只写不清，凡是签过到的账号都恒非空 → 条件永假，
+          // 待复核标记在真实账号上一次都不会出现（见 #71 第二轮复审）。
+          var pendingToday = !!account.checkin_pending;
+          // checkin_today 是后端按「last_date 是否等于今天」算出来的布尔。
+          // 用来把「今天签过了」和「上次签到是前几天」在颜色上分开：last_date
+          // 只写不清，光看日期串看不出今天到底签没签。
+          var confirmedToday = !!account.checkin_today;
+          var checkinCell = el("td", pendingToday
+            ? "待复核"
+            : (checkin.last_date
+              ? (checkin.last_date + (checkin.streak ? " · 连续 " + checkin.streak + " 天" : ""))
+              : "未签到"),
+            (!pendingToday && checkin.last_date && !confirmedToday) ? "muted" : null);
+          // 待复核：上游在北京时间 12 点前会对还没领到的账号回「已签到」，
+          // 此时不能显示成「已签到」，否则用户以为今天领过了。
+          if (pendingToday) {
+            checkinCell.className = "warn";
+            checkinCell.title = "上游称今日已签到，但北京时间 12 点前上游会误报，后续排程会再确认" +
+              (checkin.last_date ? "；上次确认签到：" + checkin.last_date : "");
+          }
+          var history = account.checkin_history || [];
+          if (history.length) {
+            var historyBtn = el("button", "历史 " + history.length, "act");
+            historyBtn.type = "button";
+            historyBtn.title = "展开该账号最近 " + history.length + " 次签到";
+            historyBtn.style.marginLeft = "8px";
+            historyRow = buildCheckinHistoryRow(history);
+            historyBtn.addEventListener("click", (function (target) {
+              return function () { target.hidden = !target.hidden; };
+            })(historyRow));
+            checkinCell.appendChild(historyBtn);
+          }
+          row.appendChild(checkinCell);
+        }
+      }
+
+      // 额度列。数据源只有一个：后端 /status 给的 account.quota。
+      // 没有结果时按静态能力区分两种截然不同的状态——供应商根本不提供额度
+      // 接口（OpenCode ZEN 等）就是「-- / --」，只有「支持但还没查到」才是
+      // 「查询中…」。用「结果里有没有这条」反推会让前者永久卡在查询中。
+      var quota = account.quota;
+      if (!quota) {
+        if (account.supports_quota) {
+          // 首次进入或刚添加的短暂状态：进入页面会自动查一次，添加与手动
+          // 刷新也会重查。
+          var cell = el("td", "查询中…", "muted");
+          cell.colSpan = 2;
+          row.appendChild(cell);
+        } else {
+          row.appendChild(el("td", "-- / --", "muted"));
+          row.appendChild(el("td", "--", "muted"));
+        }
+      } else if (!quota.ok) {
+        // 失败原因必须看得见：只渲染「--」时用户分不清是凭证失效、上游抖动
+        // 还是本来就查不到，也就不知道该重新授权还是稍后再查。后端已经把
+        // 原因写进缓存的 message，这里只负责展示。
+        var reason = quota.message || "额度查询失败";
+        var remainCell = el("td", "-- / --", "muted");
+        remainCell.title = reason;
+        row.appendChild(remainCell);
+        var reasonCell = el("td", shortReason(reason), "muted");
+        reasonCell.title = reason;
+        row.appendChild(reasonCell);
+      } else if (quota.unlimited) {
+        row.appendChild(el("td", "无限"));
+        row.appendChild(el("td", "—", "muted"));
+      } else {
+        // has_total 由后端按「上游是否真的报了总额」给出，前端不靠 total>0 反推：
+        // 有的上游只报可用余额（AutoClaw 的积分钱包只有 balance），把 0 当总额
+        // 会拼出「10000 / 0」再配一条红色 0% 空槽，既错又误导。此时按
+        // 「余额 / —」展示，比例留空。
+        var hasTotal = !!quota.has_total;
+        var remainCell = el("td", quota.remain + " / " + (hasTotal ? quota.total : "—"));
+        if (!hasTotal) {
+          remainCell.title = "上游只提供可用余额，没有总额 / 已用概念";
+        } else if (!(quota.total > 0)) {
+          remainCell.title = "上游报了总额但它是 0，算不出剩余比例";
+        }
+        // 本次刷新失败、显示的是上次成功读数：必须标出来，否则旧数字会被
+        // 当成实时值。上游限流/超时是常态，清空额度列反而让人分不清
+        // 「没额度了」和「这次没取到」。
+        if (quota.stale) {
+          remainCell.appendChild(el("span", " 非实时", "muted"));
+          remainCell.title = "本次刷新失败，显示上次读数" +
+            (quota.fetched_at ? "（取于 " + quota.fetched_at.slice(0, 19).replace("T", " ") + "）" : "") +
+            "：" + (quota.stale_reason || "原因未知");
+        }
+        row.appendChild(remainCell);
+        // 待生效的活动授予跟在「剩余 / 总额」后面：它已经领到但还没进桶，
+        // 既不能算进上面两个数（会让人以为现在就能用），也不能不显示。
+        var pending = pendingQuota(quota);
+        if (pending > 0) {
+          var pendingTag = el("span", " 待生效 " + pending, "muted");
+          pendingTag.title = "已领取的活动额度，生效后并入上面的剩余 / 总额";
+          remainCell.appendChild(pendingTag);
+        }
+        // 分母守卫：has_total 只说明上游报了总额键，不保证它大于 0。
+        // CodeArts 未开通福利、Qoder 的 0/0 桶都会给出 total=0。此时既不能
+        // 相除（NaN%），也不能按 0% 画一条红色空槽——红槽读起来像「额度已经
+        // 用光」，而事实是「没有可用的总额」（见 #71 第二轮复审 P1-1）。
+        var ratioKnown = hasTotal && quota.total > 0;
+        var ratio = ratioKnown ? (quota.remain / quota.total) : 0;
+        var barCell = el("td");
+        if (ratioKnown) {
+          // 阈值着色：剩余 >=50% 绿 / 20~50% 琥珀 / <20% 红（该列显示的即剩余比例）。
+          var bar = el("span", null, ratio >= 0.5 ? "bar" : (ratio >= 0.2 ? "bar warn" : "bar err"));
+          var fill = el("i");
+          // 用 scaleX 而不是 width：宽度变化会触发整行 layout + paint，
+          // 一排仪表同时刷新就是几十次重排；scaleX 只交给合成器。
+          fill.style.transform = "scaleX(" + Math.max(0, Math.min(1, ratio)).toFixed(4) + ")";
+          bar.appendChild(fill);
+          barCell.appendChild(bar);
+        }
+        barCell.appendChild(el("span", ratioKnown ? Math.round(ratio * 100) + "%" : "—", "muted"));
+        row.appendChild(barCell);
+      }
+
+      // 刷新时间列（展示额度数据的最后取数时间；不是凭证续期时间）
+      // 凭证 refreshed_at 只在 token 快到期时才更新，拿它当「刷新时间」会让
+      // 没到期的账号显示几周前的旧时间，看起来像没同步。额度 fetched_at 才是
+      // 上面「剩余 / 总额」真正依据的数据新鲜度，一次查询额度后全表同批次。
+      var q = account.quota || {};
+      var rt = q.fetched_at ? new Date(q.fetched_at).toLocaleString() : "-";
+      row.appendChild(el("td", rt, "muted"));
+
+      table.appendChild(row);
+      // 展开行紧随账号行：展开/收起只影响这一个账号，不重排整张表。
+      if (historyRow) table.appendChild(historyRow);
+    });
+    host.appendChild(table);
+
+    var summary = el("div", "共 " + accounts.length + (filter ? " 个账号（显示 " + visible.length + " 个）" : " 个账号")
+      + " · 插件版本 " + (status.version || "-"), "hint");
+    host.appendChild(summary);
+
+    syncAccountSelection();
+  }
+
+  // loadStatus 拉取账号状态并渲染账号表，返回 Promise 以便调用方串行编排。
+  //
+  // 返回 Promise 是必要的：额度结果要靠账号表渲染出来，两者若并行，
+  // 额度先到而状态后到就会被"查询中"覆盖（反之亦然）。串行才稳定。
+  function loadStatus(skipClearBanner) {
+    if (!skipClearBanner) clearBanner();
+    return api("GET", "/status").then(function (status) {
+      if (!status) return;
+      lastStatus = status;
+      renderAccounts(status);
+      var settings = status.settings || {};
+      document.getElementById("setAutoCheckin").checked = !!settings.auto_checkin;
+      document.getElementById("setAutoTasks").checked = !!settings.auto_tasks;
+      document.getElementById("setRaccoonDailyGrant").checked = !!settings.auto_raccoon_daily_grant;
+      var scheduler = status.scheduler || {};
+      var labels = {};
+      (settings.task_specs || []).forEach(function (spec) { labels[spec.kind] = spec.label || spec.kind; });
+      var nextTasks = (scheduler.next_tasks || []).map(function (kind) { return labels[kind] || kind; });
+      // 后端给的是已经排好的可读时刻（HH:MM，跨天补日期），页面不再拼 RFC3339。
+      document.getElementById("scheduleInfo").textContent =
+        "下次执行：" + (scheduler.next_hhmm || scheduler.next_at || "-") +
+        (nextTasks.length ? " · 任务：" + nextTasks.join("、") : "");
+      // 自愈：上次变更后重载没跑成功（页面被关掉、宿主当时不可用），这里补一次。
+      // 重载成功后插件会清除该标记；每次页面生命周期只补一次，避免宿主不支持
+      // 自动重载时反复写配置。
+      if (status.restart_pending && !modelSyncSelfHealed) {
+        modelSyncSelfHealed = true;
+        syncModelConfig();
+      }
+    }).catch(function (err) {
+      // 这里只报一次错、不再往外抛：loadStatus 常被别的链路（如 loadQuotas）
+      // 串在 .then 里，rethrow 会让下游 catch 再弹一次同样的横幅，而顶层
+      // 又没人接这个 rejection，控制台只会多一条 unhandled rejection。
+      banner("err", err.message);
+      return null;
+    });
+  }
+
+  // deleteArmed 记录「删除」按钮是否已进入确认态（5 秒后自动复位）。
+  var deleteArmed = false;
+
+  // deleteSelectedAccounts 批量删除勾选的账号（两次点击确认）。
+  //
+  // 删除的是凭证文件：宿主用 fsnotify 监听 auth 目录，删掉文件后会自动
+  // 注销该账号，不需要额外通知。删除不可恢复，必须让用户确认一次；
+  // 按钮状态用全局标志记下「已确认」，避免误点。
+  function deleteSelectedAccounts(btn) {
+    var ids = selectedAccountIDs();
+    if (!ids.length) return;
+    if (!deleteArmed) {
+      deleteArmed = true;
+      banner("warn", "再次点击「删除」确认删除选中的 " + ids.length + " 个账号（不可恢复）");
+      btn.textContent = "确认删除";
+      setTimeout(function () {
+        deleteArmed = false;
+        syncAccountSelection();
+      }, 5000);
+      return;
+    }
+    deleteArmed = false;
+    btn.disabled = true;
+    api("POST", "/accounts/delete", { account_ids: ids })
+      .then(function (data) {
+        if (!data) return;
+        var results = data.results || [];
+        var failed = results.filter(function (r) { return !r.ok; });
+        banner(failed.length ? "warn" : "ok",
+          failed.length
+            ? "已删除 " + (results.length - failed.length) + " 个账号，" + failed.length + " 个失败：" + failed[0].message
+            : (data.error || ("已删除 " + (data.deleted || ids.length) + " 个账号")), 8000);
+        // 成功的从选中集合移除；失败的保留勾选，便于重试。
+        results.forEach(function (r) { if (r.ok) delete selectedAccounts[r.auth_id]; });
+        // 删除后立即重新拉状态，让已删账号从列表消失。
+        loadStatus(true).catch(function () { });
+      })
+      .catch(function (err) { banner("err", err.message); })
+      .then(function () { syncAccountSelection(); });
+  }
+
+  // toggleSelectedAccounts 批量启用/停用勾选的账号。
+  //
+  // 停用只写凭证上的 disabled 标记（宿主扫盘后不再路由到它），文件与 token
+  // 都保留，随时可以再启用——与删除是两件事。
+  function toggleSelectedAccounts(disabled) {
+    var ids = selectedAccountIDs();
+    if (!ids.length) { banner("err", "请先勾选账号"); return; }
+    var verb = disabled ? "停用" : "启用";
+    api("POST", "/accounts/enabled", { account_ids: ids, enabled: !disabled }).then(function (data) {
+      if (!data) return;
+      var failed = (data.results || []).filter(function (r) { return !r.ok; });
+      banner(failed.length ? "warn" : "ok",
+        failed.length ? verb + "失败：" + failed[0].message : "已" + verb + " " + (data.changed || 0) + " 个账号", 8000);
+      loadStatus(true).catch(function () { });
+    }).catch(function (err) { banner("err", err.message); });
+  }
+

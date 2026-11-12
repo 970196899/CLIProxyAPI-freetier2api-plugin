@@ -16,6 +16,8 @@ type settingsUpdateRequest struct {
 	AutoTasks             *bool            `json:"auto_tasks"`
 	AutoRaccoonDailyGrant *bool            `json:"auto_raccoon_daily_grant"`
 	TaskSchedules         map[string][]int `json:"task_schedules"`
+	// TaskScheduleMinutes 是分钟级排程（当天分钟数 0-1439），优先于整点列表。
+	TaskScheduleMinutes map[string][]int `json:"task_schedule_minutes"`
 
 	// Deprecated: 兼容旧版页面/脚本的固定字段。
 	CheckinHours   []int `json:"checkin_hours"`
@@ -60,6 +62,9 @@ func (s *Service) handleSettingsRequest(req pluginapi.ManagementRequest) plugina
 		if current.TaskSchedules == nil {
 			current.TaskSchedules = map[string][]int{}
 		}
+		if current.TaskScheduleMinutes == nil {
+			current.TaskScheduleMinutes = map[string][]int{}
+		}
 		for kind, hours := range body.TaskSchedules {
 			kind = strings.TrimSpace(kind)
 			if kind == "" {
@@ -69,7 +74,21 @@ func (s *Service) handleSettingsRequest(req pluginapi.ManagementRequest) plugina
 				continue
 			}
 			current.TaskSchedules[kind] = tasks.NormalizeHours(hours)
+			// 显式回到整点语义：不清掉分钟覆盖的话，用户「改成整点」不会生效
+			// （分钟优先），表现为设置被吞掉。
+			delete(current.TaskScheduleMinutes, kind)
 			changed["task_schedules"] = current.TaskSchedules
+		}
+		for kind, minutes := range body.TaskScheduleMinutes {
+			kind = strings.TrimSpace(kind)
+			if kind == "" {
+				continue
+			}
+			if _, known := s.tasks.Catalog().SpecByKind(kind); !known {
+				continue
+			}
+			current.TaskScheduleMinutes[kind] = tasks.NormalizeMinutes(minutes)
+			changed["task_schedule_minutes"] = current.TaskScheduleMinutes
 		}
 		for kind, hours := range map[string][]int{
 			"checkin":   body.CheckinHours,
@@ -80,6 +99,7 @@ func (s *Service) handleSettingsRequest(req pluginapi.ManagementRequest) plugina
 		} {
 			if hours != nil {
 				current.TaskSchedules[kind] = tasks.NormalizeHours(hours)
+				delete(current.TaskScheduleMinutes, kind)
 				changed["task_schedules"] = current.TaskSchedules
 			}
 		}

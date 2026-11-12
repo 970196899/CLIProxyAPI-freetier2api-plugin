@@ -1,0 +1,119 @@
+  // ---- 视图切换与事件绑定 ----
+
+  document.getElementById("btnUseKey").addEventListener("click", function () {
+    if (keyBusy) return;
+    if (Date.now() < keyRetryAfter) {
+      banner("warn", "密钥刚验证失败，请稍候几秒再试（CPA 按 IP 统计失败次数，不能连续重试）。");
+      return;
+    }
+    var input = document.getElementById("keyInput");
+    var value = (input.value || "").trim();
+    if (!value) { banner("err", "请先填入管理密钥"); return; }
+    if (!KEY_RE.test(value)) { banner("err", "管理密钥只能包含可见 ASCII 字符"); return; }
+
+    // 先发**一个**探针请求验证；通过后才记忆并加载数据。失败就到此为止，
+    // 绝不把首屏请求全打出去（那会正好撞上 CPA 的 5 次封禁阈值）。
+    keyBusy = true;
+    manualKey = value;
+    stopped = false;
+    authReady = false;
+    setKeyStatus("正在验证密钥…");
+    probeManagementAuth().then(function (ok) {
+      keyBusy = false;
+      if (!ok) {
+        manualKey = "";
+        keyRetryAfter = Date.now() + 10000;
+        revealKeyInput();
+        setKeyStatus("密钥无效，请重新输入（面板勾选「记住密码」可免输）");
+        if (!stopped) banner("err", "密钥验证失败：请求未能通过 CPA 鉴权。");
+        return;
+      }
+      // 只在本标签页记住（关闭即失效），且必须是验证过的值。
+      try { sessionStorage.setItem(MANUAL_STORE_KEY, value); } catch (e) { /* 忽略 */ }
+      authReady = true;
+      input.value = "";
+      document.getElementById("keyBox").hidden = true;
+      setKeyStatus("已使用手动填入的密钥");
+      clearBanner();
+      startConsole();
+    });
+  });
+
+  // ---- 添加账号（OAuth 设备授权）----
+  //
+  // 这两个接口是**宿主**提供的（不是本插件的路由）：
+  //   GET /v0/management/workbuddy-auth-url?realm=cn|global   取授权链接
+  //   GET /v0/management/get-auth-status?state=...            轮询授权状态
+  // 宿主按路径里的 "<provider>-auth-url" 把请求转给插件的 auth.login.start，
+  // 插件完成登录后由宿主把凭证落盘。
+  var loginTimer = null;
+
+  function stopLoginPolling() {
+    if (loginTimer) { clearInterval(loginTimer); loginTimer = null; }
+  }
+
+  var currentApiKeyVendor = null;
+  // currentLoginState 记着本次登录的 state：粘贴回调链接时要带回去，
+  // 插件据此认出是哪一个会话的回调。
+  var currentLoginState = "";
+
+  // startVendorAdd 根据供应商能力决定「添加账号」的动作。
+  //
+  // 支持登录的供应商（Cline / WorkBuddy / Qoder）→ 发起设备授权；
+  // 纯 API key 的供应商（OpenCode ZEN）→ 展开 API Key 输入框，保存后直写凭证文件。
+  function startVendorAdd(vendor) {
+    var loginBox = document.getElementById("loginBox");
+    var apiKeyBox = document.getElementById("apiKeyBox");
+    stopLoginPolling();
+
+    // 登录前要求人机验证的供应商（AutoClaw 国际版）：先渲染 Zai/Google 入口，
+    // 拖完滑块拿到令牌后才去换授权链接。凭证粘贴仍作为兜底保留在面板里。
+    if (vendor && vendor.login_captcha) {
+      startCaptchaLogin(vendor);
+      return;
+    }
+
+    if (vendor.supports_login !== false && vendor.auth_mode !== "apikey") {
+      if (apiKeyBox) apiKeyBox.hidden = true;
+      startLogin(vendor);
+      return;
+    }
+
+    // API Key 型供应商：直接在页面展示输入框添加
+    if (loginBox) loginBox.hidden = true;
+    var smsBox = document.getElementById("smsBox");
+    if (smsBox) smsBox.hidden = true;
+    currentApiKeyVendor = vendor;
+    if (apiKeyBox) {
+      apiKeyBox.hidden = false;
+      document.getElementById("apiKeyTitle").textContent = "添加 " + vendor.name + " 账号";
+      document.getElementById("apiKeyHint").textContent = "请输入从官网申请的 API Key，保存后插件将自动在 auth 目录创建凭证文件。";
+      document.getElementById("inputApiKey").value = "";
+      document.getElementById("inputApiLabel").value = "";
+      document.getElementById("inputApiKey").focus();
+    }
+  }
+
+  // startCredentialPaste 打开通用凭证粘贴框（autoclawglobal 用）。
+  // 复用 apiKeyBox：单输入框贴 JSON，插件侧 ParseCredential 兼容。
+  function startCredentialPaste(vendor) {
+    stopLoginPolling();
+    resetLoginCaptcha();
+    clearLoginVariants();
+    currentApiKeyVendor = vendor;
+    var login = document.getElementById("loginBox");
+    var sms = document.getElementById("smsBox");
+    if (login) login.hidden = true;
+    if (sms) sms.hidden = true;
+    var apiKeyBox = document.getElementById("apiKeyBox");
+    if (!apiKeyBox) return;
+    apiKeyBox.hidden = false;
+    document.getElementById("apiKeyTitle").textContent = "粘贴 " + vendor.name + " 凭证";
+    document.getElementById("apiKeyHint").textContent =
+      "粘贴 AutoClaw 国际版凭证 JSON（含访问令牌与刷新令牌，可从 AutoClaw 桌面端登录态文件或 Agent2API 获取）。" +
+      "保存后插件会自动续期。";
+    document.getElementById("inputApiKey").value = "";
+    document.getElementById("inputApiLabel").value = "";
+    document.getElementById("inputApiKey").focus();
+  }
+

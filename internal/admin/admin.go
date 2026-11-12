@@ -26,7 +26,34 @@ const (
 	// batchConcurrency 是批量操作的默认并发度上限。
 	// 额度查询按账号并发，6 路可以避免排在末尾的账号（如 Trae）拖慢整轮。
 	batchConcurrency = 6
+	// quotaAccountTimeout 是**单个账号**额度查询的预算。
+	//
+	// 原先整批共用一个 3 分钟的 ctx：账号一多，排在末尾的请求拿到的是已经
+	// 耗尽的 context，于是页面显示「超时」——可真正的超时（上游慢）根本没
+	// 发生，只是预算被前面的账号吃光了。逐账号独立预算 + 批次预算按波次算，
+	// 尾部账号才有和头部一样的待遇。
+	quotaAccountTimeout = 45 * time.Second
+	// quotaBatchMaxBudget 是整批预算的硬上限：账号再多也不让一轮跑太久。
+	quotaBatchMaxBudget = 10 * time.Minute
 )
+
+// quotaBatchBudget 按账号数量与并发度估算整批预算。
+//
+// 低于 requestTimeout 时取 requestTimeout（少量账号照旧），超过上限则封顶。
+func quotaBatchBudget(jobs int) time.Duration {
+	if jobs <= 0 {
+		return requestTimeout
+	}
+	waves := (jobs + batchConcurrency - 1) / batchConcurrency
+	budget := time.Duration(waves)*quotaAccountTimeout + 15*time.Second
+	if budget < requestTimeout {
+		budget = requestTimeout
+	}
+	if budget > quotaBatchMaxBudget {
+		budget = quotaBatchMaxBudget
+	}
+	return budget
+}
 
 // Identity 是插件的对外身份。
 type Identity struct {
